@@ -1,0 +1,481 @@
+#!/usr/bin/env python
+import argparse
+import json
+import logging
+import os
+import subprocess
+from typing import Dict, List, Optional, Set
+
+from dotenv import load_dotenv
+from google.genai.types import HarmBlockThreshold, HarmCategory, SafetySettingDict
+from pydantic import BaseModel, Field
+from pydantic_ai import Agent
+from pydantic_ai.models.google import GoogleModel, GoogleModelSettings
+from pydantic_ai.providers.google import GoogleProvider
+
+# --- Configuration ---
+CONTEXT_SIZE_LIMIT = 200000
+MAX_REANALYSIS_RETRIES = 3
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# --- Pydantic Models for Code Analysis & Generation ---
+class NewFile(BaseModel):
+    """Represents a new file that needs to be created for the task."""
+    file_path: str = Field(description="The full path for the new file to be created.")
+    reasoning: str = Field(description="Brief explanation of why this file is needed.")
+    content_suggestions: List[str] = Field(
+        default=[],
+        description="A list of suggested functions, classes, or other code structures for the new file."
+    )
+
+class CodeAnalysis(BaseModel):
+    """Represents the initial analysis of the codebase for a given task."""
+    relevant_files: List[str] = Field(
+        default=[],
+        description="A list of existing file paths that are most relevant to read for understanding the context."
+    )
+    files_to_edit: List[str] = Field(
+        default=[],
+        description="A list of existing file paths that will likely need to be modified to complete the task."
+    )
+    files_to_create: List[NewFile] = Field(
+        default=[],
+        description="A list of new files that should be created to complete the task."
+    )
+    generation_order: List[str] = Field(
+        default=[],
+        description="The recommended order to process files (both creating and editing) to satisfy dependencies. For example, create a utility file before editing a file that uses it."
+    )
+    reasoning: str = Field(
+        default="",
+        description="A brief, high-level explanation of the overall strategy, why these files were chosen, and why the generation order is correct."
+    )
+
+class GitGrepSearchInput(BaseModel):
+    """Input model for the git grep search tool."""
+    query: str = Field(description="The keyword or regex pattern to search for within the git repository.")
+
+class GeneratedCode(BaseModel):
+    """Represents the AI-generated code for a single file."""
+    file_path: str = Field(description="The path of the file for which code is being generated.")
+    code: str = Field(description="The complete, production-ready source code for the file.")
+    reasoning: str = Field(description="A brief explanation of the changes made or the file's purpose.")
+    requires_more_context: bool = Field(
+        default=False,
+        description="Set to true if you cannot generate the code due to insufficient context."
+    )
+    context_request: str = Field(
+        default="",
+        description="If requires_more_context is true, explain what specific information or files are needed."
+    )
+
+
+# --- Core Logic for AI Interaction ---
+class AiCodeAgent:
+    """Handles all interactions with the Gemini AI model."""
+    def __init__(self):
+        """Initializes the agent and loads the API key."""
+        load_dotenv()
+        self.api_key = os.getenv("GOOGLE_API_KEY")
+        if not self.api_key:
+            raise ValueError("GOOGLE_API_KEY is not set. Please create a .env file and add it.")
+
+    def _get_gemini_model(self, model_name: str) -> GoogleModel:
+        """Configures and returns a specific Gemini model instance."""
+        if self.api_key is None:
+            raise ValueError("API key is not set. Please set GOOGLE_API_KEY in your environment variables.")
+        
+        return GoogleModel(
+            model_name,
+            provider=GoogleProvider(
+                api_key=self.api_key,
+            ),
+            settings={
+                "temperature": 0.2,
+            }
+        )
+
+    def get_initial_analysis(self, task: str, file_list: List[str], directory: str, app_description: str = "", feedback: Optional[str] = None) -> CodeAnalysis:
+        """Runs the agent to get the code analysis, potentially using feedback or a search tool."""
+        
+        # Tool definition within the method's scope to capture the 'directory' argument
+        def git_grep_search_tool(query: str) -> str:
+            """
+            Performs a case-insensitive 'git grep' search in the codebase to find relevant files.
+            Returns a list of files and line numbers containing the query.
+            """
+            logging.info(f"🛠️ Running git grep search for: '{query}'")
+            try:
+                result = subprocess.run(
+                    ['git', 'grep', '-i', '-n', query],
+                    cwd=directory,
+                    capture_output=True,
+                    text=True,
+                    check=False # Don't raise error if grep returns 1 (no matches)
+                )
+                if result.returncode == 0:
+                    return f"Git grep results for '{query}':\n{result.stdout}"
+                elif result.returncode == 1:
+                    return f"No results found for '{query}'."
+                else:
+                    logging.error(f"Error during git grep: {result.stderr}")
+                    return f"Error executing git grep: {result.stderr}"
+            except FileNotFoundError:
+                logging.error("❌ 'git' command not found. Is Git installed?")
+                return "Error: 'git' command not found. Cannot perform search."
+            except Exception as e:
+                logging.error(f"An unexpected error occurred during git grep: {e}")
+                return f"An unexpected error occurred: {e}"
+
+        system_prompt = f"""
+You are an expert software developer planning a coding task. Your goal is to analyze a project's file structure 
+to determine which files are relevant, which need editing, which new files to create, and the correct order of operations.
+
+**You have access to a tool: `git_grep_search_tool`**.
+
+- **When to use the tool**: Use this tool if the file list is large, or the task description contains specific keywords, function names, or variable names. This helps you pinpoint relevant code. For example, if the task is "add a new endpoint to the user API", a good search query would be "user_api" or "app.route('/api/user'".
+- **How to use the tool**: Call the tool with a single `query` string.
+- **After using the tool**: Use the search results to populate the `relevant_files` and `files_to_edit` fields accurately.
+- **If you don't need the tool**: If the file list is small and you can easily identify the correct files, you don't need to use the tool. Just provide the `CodeAnalysis` directly.
+
+Project Description:
+---
+{app_description or "No description provided."}
+---
+
+Your task is to populate the CodeAnalysis object based on the user's request and the provided file list.
+
+**CRITICAL**: You must determine the correct `generation_order`. This is the most important part of your plan.
+List all file paths from `files_to_edit` and `files_to_create` in the specific sequence they should be processed.
+The order must respect dependencies. For example, if you create `new_module.py` and then modify `main.py` to import and use it, the `generation_order` MUST be `['new_module.py', 'main.py']`.
+Explain your reasoning for this order in the `reasoning` field.
+"""
+        if feedback:
+            system_prompt += f"""
+---
+IMPORTANT: This is a re-analysis. A previous attempt failed due to insufficient context.
+The programmer's feedback was: "{feedback}"
+Please adjust your file selection. You might need to use the `git_grep_search_tool` or add more files to `relevant_files`.
+---
+"""
+
+        prompt = f"""
+Full list of files in the repository:
+{json.dumps(file_list, indent=2)}
+
+My task is: "{task}"
+
+Please provide your analysis. Use the `git_grep_search_tool` if you need to find specific code snippets.
+"""
+        analysis_agent = Agent(
+            self._get_gemini_model('gemini-2.5-flash'),
+            output_type=CodeAnalysis,
+            system_prompt=system_prompt,
+            tools=[git_grep_search_tool]
+        )
+        log_message = "🤖 Conducting initial codebase analysis..." if not feedback else f"🔁 Re-analyzing codebase with feedback: {feedback}"
+        logging.info(log_message)
+        
+        # Set all harm categories to BLOCK_NONE for maximum model output flexibility
+        harm_categories: List[HarmCategory] = [
+            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+            HarmCategory.HARM_CATEGORY_HARASSMENT,
+            HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+            HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY,
+        ]
+        google_safety_settings: List[SafetySettingDict] = [
+            SafetySettingDict(
+                category=cat,
+                threshold=HarmBlockThreshold.BLOCK_NONE
+            ) for cat in harm_categories
+        ]
+        analysis = analysis_agent.run_sync(
+            prompt,
+            model_settings=GoogleModelSettings(
+            google_safety_settings=google_safety_settings
+            ),
+        )
+        return analysis.output
+
+    def summarize_code(self, file_path: str, code_content: str) -> str:
+        """Summarizes a single file's code content."""
+        system_prompt = """
+You are an expert code analyst. Your task is to summarize the provided code. 
+Focus on the file's primary purpose, its key functions, classes, and their responsibilities. 
+Mention any important logic or side effects. The summary should be concise and informative.
+"""
+        prompt = f"Please summarize the following code from the file `{file_path}`:"
+        summarizer_agent = Agent(self._get_gemini_model('gemini-2.5-flash'), output_type=str, system_prompt=system_prompt)
+        logging.info(f"📝 Summarizing code in {file_path}...")
+        summary = summarizer_agent.run_sync(prompt)
+        return summary.output
+
+    def generate_file_content(self, task: str, context: str, file_path: str, original_content: Optional[str] = None, strict: bool = True) -> GeneratedCode:
+        """Generates the full code for a given file."""
+        action = "editing" if original_content is not None else "creating"
+        
+        system_prompt = f"""
+You are an expert programmer tasked with writing a complete Python file.
+Based on the overall task, the provided context from other relevant files, and the original code (if any), 
+you will generate the full, production-ready code for the specified file path.
+
+**IMPORTANT RULES**:
+1.  Your output must be the complete, raw code for the file. Do not include markdown backticks (```python ... ```) or any other explanations in the `code` field.
+2.  The code should be well-structured, follow best practices, and be ready for integration.
+3.  {"You must only make code changes directly related to completion of the task, refactors and cleaning up should not be prioritised unless specifically part of the task given" if strict else "You may make other changes as you see fit to improve code maintainability and clarity."}
+4.  If the provided context is insufficient for you to complete the task for `{file_path}`, you MUST:
+    a. Set the `requires_more_context` flag to `true`.
+    b. Leave the `code` field empty.
+    c. In the `context_request` field, clearly and specifically explain what additional files or information you need to proceed. For example: "I need to see the contents of `utils/database.py` to understand how to query the database."
+"""
+        prompt = f"""
+Overall Task: "{task}"
+
+Context from other relevant files in the project:
+---
+{context}
+---
+
+You are currently {action} the file: `{file_path}`.
+"""
+        if original_content is not None:
+            prompt += f"""
+Original content of `{file_path}`:
+---
+{original_content}
+---
+"""
+        prompt += "\nPlease generate the complete, new source code for this file. If you lack context, please request it."
+
+        # Use a more powerful model for code generation
+        generation_agent = Agent(self._get_gemini_model('gemini-2.5-pro'), output_type=GeneratedCode, system_prompt=system_prompt)
+        
+        logging.info(f"💡 Generating new code for {file_path}...")
+        harm_categories: List[HarmCategory] = [
+            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+            HarmCategory.HARM_CATEGORY_HARASSMENT,
+            HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+            HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY,
+        ]
+        google_safety_settings: List[SafetySettingDict] = [
+            SafetySettingDict(
+                category=cat,
+                threshold=HarmBlockThreshold.BLOCK_NONE
+            ) for cat in harm_categories
+        ]
+        generated_code = generation_agent.run_sync(
+            prompt,
+            model_settings=GoogleModelSettings(
+            google_safety_settings=google_safety_settings
+            ),
+        )
+        return generated_code.output
+
+
+# --- CLI and File Operations ---
+class CliManager:
+    """Manages CLI interactions, file I/O, and orchestrates the analysis and code generation."""
+
+    def __init__(self):
+        self.ai_agent = AiCodeAgent()
+
+    def _get_git_files(self, directory: str) -> List[str]:
+        """Gets the list of files tracked by Git."""
+        try:
+            logging.info(f"🔍 Searching for git files in: {directory}")
+            result = subprocess.run(
+                ['git', 'ls-files'], cwd=directory, capture_output=True, text=True, check=True
+            )
+            files = result.stdout.strip().split('\n')
+            logging.info(f"✅ Found {len(files)} files tracked by git.")
+            return files
+        except FileNotFoundError:
+            logging.error("❌ 'git' command not found. Is Git installed and in your PATH?")
+            return []
+        except subprocess.CalledProcessError as e:
+            logging.error(f"❌ Error executing 'git ls-files': {e.stderr}")
+            return []
+
+    def _read_file_content(self, directory: str, file_path: str) -> Optional[str]:
+        """Safely reads the content of a single file."""
+        full_path = os.path.join(directory, file_path)
+        try:
+            with open(full_path, 'r', encoding='utf-8') as f:
+                return f.read()
+        except FileNotFoundError:
+            logging.warning(f"⚠️ File not found while reading: {full_path}")
+            return None
+        except Exception as e:
+            logging.error(f"❌ Error reading file {full_path}: {e}")
+            return None
+
+    def _write_file_content(self, directory: str, file_path: str, content: str):
+        """Writes content to a file, creating directories if necessary."""
+        full_path = os.path.join(directory, file_path)
+        try:
+            # Ensure the directory exists
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            with open(full_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            logging.info(f"✅ Successfully wrote changes to {full_path}")
+        except Exception as e:
+            logging.error(f"❌ Error writing to file {full_path}: {e}")
+            
+    def _build_context_from_dict(self, context_data: Dict[str, str], exclude_file: Optional[str] = None) -> str:
+        """Builds a context string from a dictionary of file contents, summarizing if too large."""
+        
+        files_to_process = {
+            k: v for k, v in context_data.items() if k != exclude_file
+        }
+        
+        total_size = sum(len(content) for content in files_to_process.values())
+
+        context_source = f"(from {len(files_to_process)} files, excluding {exclude_file})" if exclude_file else f"(from {len(files_to_process)} files)"
+
+        if total_size > CONTEXT_SIZE_LIMIT:
+            logging.warning(f"Context size {context_source} is {total_size} chars, exceeding limit of {CONTEXT_SIZE_LIMIT}. Summarizing...")
+            context_parts: List[str] = []
+            for file_path, content in files_to_process.items():
+                summary = self.ai_agent.summarize_code(file_path, content)
+                context_parts.append(f"--- Summary of {file_path} ---\n{summary}\n")
+            return "\n".join(context_parts)
+        else:
+            logging.info(f"Context size {context_source} is {total_size} chars. Using full file contents.")
+            context_parts = []
+            for file_path, content in files_to_process.items():
+                context_parts.append(f"--- Content of {file_path} ---\n{content}\n")
+            return "\n".join(context_parts)
+    
+    def run(self):
+        """The main entry point for the CLI tool."""
+        task = "Can you make the static photo URL in restaurant_service.py still match the sizes given in the request?"
+
+        parser = argparse.ArgumentParser(
+            description="A tool to analyze a git repository and apply AI-generated code changes for a specific task."
+        )
+        parser.add_argument("--task", type=str, default=task, help="The task description for the AI.")
+        parser.add_argument(
+            "--dir", type=str, default=os.getcwd(), help="The directory of the git repository."
+        )
+        parser.add_argument(
+            "--app-description", type=str, default="app_description.txt",
+            help="Path to a text file describing the app's purpose."
+        )
+        parser.add_argument(
+            "--force", action="store_true",
+            help="Bypass confirmation before overwriting files."
+        )
+        parser.add_argument(
+            "--strict", type=bool, default=True,
+            help="Whether the AI should be liberal with making changes or restrict changes to only those needed for the task"
+        )
+        args = parser.parse_args()
+
+        # --- 1. Initial Setup ---
+        app_desc_content = self._read_file_content(args.dir, args.app_description) or ""
+        git_files = self._get_git_files(args.dir)
+        if not git_files:
+            return
+
+        # --- 2. Initial Analysis ---
+        analysis = self.ai_agent.get_initial_analysis(args.task, git_files, args.dir, app_desc_content)
+        
+        print("\n--- AI Code Analysis Result ---")
+        print(f"Task: {args.task}\n")
+        print(f"Overall Reasoning:\n {analysis.reasoning}\n")
+        print("Relevant Files for Context:", analysis.relevant_files or "None")
+        print("Files to Edit:", analysis.files_to_edit or "None")
+        print("Files to Create:", [f.file_path for f in analysis.files_to_create] or "None")
+        print("Proposed Generation Order:", analysis.generation_order or "None")
+        print("---------------------------------\n")
+
+        # Validate the plan for consistency
+        planned_files: Set[str] = set(analysis.files_to_edit) | {f.file_path for f in analysis.files_to_create}
+        ordered_files: Set[str] = set(analysis.generation_order)
+
+        if planned_files != ordered_files:
+            logging.error("Analysis Error: Mismatch between files to change and the generation order.")
+            if planned_files - ordered_files:
+                logging.error(f"Planned but not in order: {planned_files - ordered_files}")
+            if ordered_files - planned_files:
+                logging.error(f"In order but not planned: {ordered_files - planned_files}")
+            return
+            
+        all_files_to_process = analysis.generation_order # Use the AI-provided intelligent order
+        if not all_files_to_process:
+            logging.info("No files to edit or create based on initial analysis. Exiting.")
+            return
+
+        # --- 3. User Confirmation ---
+        if not args.force:
+            proceed = input("Proceed with generating and writing file changes? (y/n): ").lower()
+            if proceed != 'y':
+                logging.info("Operation cancelled by user.")
+                return
+
+        # --- 4. Iterative Generation and Re-analysis Loop ---
+        retries = 0
+        feedback_for_next_loop = ""
+
+        while all_files_to_process and retries < MAX_REANALYSIS_RETRIES:
+            if feedback_for_next_loop:
+                # Re-analyze with feedback
+                analysis = self.ai_agent.get_initial_analysis(
+                    args.task, git_files, args.dir, app_desc_content, feedback=feedback_for_next_loop
+                )
+                # We update the full list of files to process based on the new analysis
+                all_files_to_process = analysis.generation_order
+                feedback_for_next_loop = "" # Reset feedback
+
+            # Pre-load all necessary context into an in-memory dictionary.
+            files_for_context = list(set(analysis.relevant_files + analysis.files_to_edit))
+            context_data: Dict[str, str] = {}
+            logging.info("Pre-loading context from disk for dynamic updates...")
+            for fp in files_for_context:
+                content = self._read_file_content(args.dir, fp)
+                if content is not None:
+                    context_data[fp] = content
+            
+            processed_in_this_loop: List[str] = []
+            reanalysis_needed = False
+
+            for file_path in all_files_to_process:
+                full_context = self._build_context_from_dict(context_data, exclude_file=file_path)
+                
+                original_content = context_data.get(file_path)
+                
+                generated_code = self.ai_agent.generate_file_content(args.task, full_context, file_path, original_content, strict=args.strict)
+
+                if generated_code.requires_more_context:
+                    logging.warning(f"Generator needs more context for file {file_path}.")
+                    logging.info(f"Reason: {generated_code.context_request}")
+                    feedback_for_next_loop = generated_code.context_request
+                    retries += 1
+                    reanalysis_needed = True
+                    break # Exit the for loop to start the while loop again with re-analysis
+                else:
+                    self._write_file_content(args.dir, file_path, generated_code.code)
+                    # Update context with the newly generated code for subsequent steps in this loop
+                    context_data[file_path] = generated_code.code
+                    processed_in_this_loop.append(file_path)
+
+            # Update the list of files that still need processing
+            all_files_to_process = [f for f in all_files_to_process if f not in processed_in_this_loop]
+
+            if not reanalysis_needed:
+                # If we completed a full loop without needing re-analysis, we are done
+                break
+        
+        # --- 5. Final Status ---
+        if all_files_to_process:
+            logging.error(f"❌ Failed to complete the task after {MAX_REANALYSIS_RETRIES} retries. The following files were not processed:")
+            for file_path in all_files_to_process:
+                logging.error(f"   - {file_path}")
+        else:
+            logging.info("✅ All changes have been successfully applied.")
+
+if __name__ == "__main__":
+    cli = CliManager()
+    cli.run()
