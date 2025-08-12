@@ -161,43 +161,46 @@ class CliManager:
     def __init__(self):
         self.ai_agent = AiCodeReviewAgent()
 
-    def _get_changed_files(self, directory: str, compare_branch: str) -> List[str]:
-        """Gets files changed between the current state and the compare_branch."""
-        if not compare_branch:
-            logging.warning("No compare branch provided. Cannot determine changed files.")
-            return []
+    def _get_changed_files(self, directory: str) -> List[str]:
+        """Gets all local changes: staged, unstaged, and untracked files."""
         try:
-            logging.info(f"Fetching latest changes for branch '{compare_branch}'...")
-            subprocess.run(
-                ["git", "fetch", "origin", compare_branch],
-                cwd=directory,
-                check=True,
-                capture_output=True,
-                text=True,
+            logging.info("Checking for local changes (staged, unstaged, untracked)...")
+
+            # Staged changes (files added to the index but not yet committed)
+            staged_result = subprocess.run(
+                ["git", "diff", "--name-only", "--cached"],
+                cwd=directory, capture_output=True, text=True, check=True
             )
-            
-            logging.info(f"Comparing HEAD against 'origin/{compare_branch}'...")
-            result = subprocess.run(
-                ["git", "diff", "--name-only", f"origin/{compare_branch}...HEAD"],
-                cwd=directory,
-                capture_output=True,
-                text=True,
-                check=True,
+            staged_files = staged_result.stdout.strip().split("\n") if staged_result.stdout.strip() else []
+
+            # Unstaged changes (files modified in the working directory but not staged)
+            unstaged_result = subprocess.run(
+                ["git", "diff", "--name-only"],
+                cwd=directory, capture_output=True, text=True, check=True
             )
-            files = result.stdout.strip().split("\n")
-            # Handle case where there are no changes
-            if files == [""]:
+            unstaged_files = unstaged_result.stdout.strip().split("\n") if unstaged_result.stdout.strip() else []
+
+            # Untracked files (new files not yet staged)
+            untracked_result = subprocess.run(
+                ["git", "ls-files", "--others", "--exclude-standard"],
+                cwd=directory, capture_output=True, text=True, check=True
+            )
+            untracked_files = untracked_result.stdout.strip().split("\n") if untracked_result.stdout.strip() else []
+
+            # Combine and get unique file paths
+            all_changed_files = sorted(list(set(staged_files + unstaged_files + untracked_files)))
+
+            if not all_changed_files:
                 return []
-            logging.info(f"✅ Found {len(files)} changed files.")
-            return files
+
+            logging.info(f"✅ Found {len(all_changed_files)} locally changed files to review.")
+            return all_changed_files
         except FileNotFoundError:
             logging.error("❌ 'git' command not found. Is Git installed?")
             return []
         except subprocess.CalledProcessError as e:
-            logging.error(f"❌ Error getting changed files: {e.stderr}")
-            logging.error(
-                f"Ensure the branch 'origin/{compare_branch}' exists and is fetchable."
-            )
+            logging.error(f"❌ Error getting local changes: {e.stderr}")
+            logging.error("Please ensure you are in a valid git repository.")
             return []
 
     def _print_review(self, reviews: List[FileReview]):
@@ -235,19 +238,15 @@ class CliManager:
     def run(self):
         """The main entry point for the CLI tool."""
         parser = argparse.ArgumentParser(
-            description="An AI agent that reviews code changes in a git repository."
+            description="An AI agent that reviews local, uncommitted code changes in a git repository."
         )
         parser.add_argument(
             "--task", type=str, required=True,
-            help="The task description or pull request details for the AI to review against."
+            help="The task description or goal of the changes for the AI to review against."
         )
         parser.add_argument(
             "--dir", type=str, default=os.getcwd(),
             help="The directory of the git repository."
-        )
-        parser.add_argument(
-            "--compare-branch", type=str, default="main",
-            help="The base branch to compare against for determining changed files (e.g., 'main', 'develop')."
         )
         parser.add_argument(
             "--app-description", type=str, default="app_description.txt",
@@ -261,9 +260,9 @@ class CliManager:
         if not all_git_files:
             return
         
-        changed_files = self._get_changed_files(args.dir, args.compare_branch)
+        changed_files = self._get_changed_files(args.dir)
         if not changed_files:
-            logging.info("No changed files detected. Exiting.")
+            logging.info("No local changes detected. Exiting.")
             return
 
         # --- 2. Initial Analysis ---

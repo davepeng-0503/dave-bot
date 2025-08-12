@@ -6,19 +6,24 @@ import os
 import subprocess
 from typing import Dict, List, Optional, Set
 
-from dotenv import load_dotenv
-from google.genai.types import HarmBlockThreshold, HarmCategory, SafetySettingDict
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
 from pydantic_ai.models.google import GoogleModel, GoogleModelSettings
 from pydantic_ai.providers.google import GoogleProvider
 
+from shared_agents_utils import (
+    BaseAiAgent,
+    build_context_from_dict,
+    get_git_files,
+    read_file_content,
+    write_file_content,
+)
+
 # --- Configuration ---
-CONTEXT_SIZE_LIMIT = 200000
 MAX_REANALYSIS_RETRIES = 3
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 # --- Pydantic Models for Code Analysis & Generation ---
 class NewFile(BaseModel):
@@ -73,29 +78,8 @@ class GeneratedCode(BaseModel):
 
 
 # --- Core Logic for AI Interaction ---
-class AiCodeAgent:
+class AiCodeAgent(BaseAiAgent):
     """Handles all interactions with the Gemini AI model."""
-    def __init__(self):
-        """Initializes the agent and loads the API key."""
-        load_dotenv()
-        self.api_key = os.getenv("GOOGLE_API_KEY")
-        if not self.api_key:
-            raise ValueError("GOOGLE_API_KEY is not set. Please create a .env file and add it.")
-
-    def _get_gemini_model(self, model_name: str) -> GoogleModel:
-        """Configures and returns a specific Gemini model instance."""
-        if self.api_key is None:
-            raise ValueError("API key is not set. Please set GOOGLE_API_KEY in your environment variables.")
-        
-        return GoogleModel(
-            model_name,
-            provider=GoogleProvider(
-                api_key=self.api_key,
-            ),
-            settings={
-                "temperature": 0.2,
-            }
-        )
 
     def get_initial_analysis(self, task: str, file_list: List[str], directory: str, app_description: str = "", feedback: Optional[str] = None) -> CodeAnalysis:
         """Runs the agent to get the code analysis, potentially using feedback or a search tool."""
@@ -178,19 +162,7 @@ Please provide your analysis. Use the `git_grep_search_tool` if you need to find
         log_message = "🤖 Conducting initial codebase analysis..." if not feedback else f"🔁 Re-analyzing codebase with feedback: {feedback}"
         logging.info(log_message)
         
-        # Set all harm categories to BLOCK_NONE for maximum model output flexibility
-        harm_categories: List[HarmCategory] = [
-            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-            HarmCategory.HARM_CATEGORY_HARASSMENT,
-            HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-            HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY,
-        ]
-        google_safety_settings: List[SafetySettingDict] = [
-            SafetySettingDict(
-                category=cat,
-                threshold=HarmBlockThreshold.BLOCK_NONE
-            ) for cat in harm_categories
-        ]
+        google_safety_settings = self.get_safety_settings()
         analysis = analysis_agent.run_sync(
             prompt,
             model_settings=GoogleModelSettings(
@@ -198,19 +170,6 @@ Please provide your analysis. Use the `git_grep_search_tool` if you need to find
             ),
         )
         return analysis.output
-
-    def summarize_code(self, file_path: str, code_content: str) -> str:
-        """Summarizes a single file's code content."""
-        system_prompt = """
-You are an expert code analyst. Your task is to summarize the provided code. 
-Focus on the file's primary purpose, its key functions, classes, and their responsibilities. 
-Mention any important logic or side effects. The summary should be concise and informative.
-"""
-        prompt = f"Please summarize the following code from the file `{file_path}`:"
-        summarizer_agent = Agent(self._get_gemini_model('gemini-2.5-flash'), output_type=str, system_prompt=system_prompt)
-        logging.info(f"📝 Summarizing code in {file_path}...")
-        summary = summarizer_agent.run_sync(prompt)
-        return summary.output
 
     def generate_file_content(self, task: str, context: str, file_path: str, original_content: Optional[str] = None, strict: bool = True) -> GeneratedCode:
         """Generates the full code for a given file."""
@@ -253,18 +212,7 @@ Original content of `{file_path}`:
         generation_agent = Agent(self._get_gemini_model('gemini-2.5-pro'), output_type=GeneratedCode, system_prompt=system_prompt)
         
         logging.info(f"💡 Generating new code for {file_path}...")
-        harm_categories: List[HarmCategory] = [
-            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-            HarmCategory.HARM_CATEGORY_HARASSMENT,
-            HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-            HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY,
-        ]
-        google_safety_settings: List[SafetySettingDict] = [
-            SafetySettingDict(
-                category=cat,
-                threshold=HarmBlockThreshold.BLOCK_NONE
-            ) for cat in harm_categories
-        ]
+        google_safety_settings = self.get_safety_settings()
         generated_code = generation_agent.run_sync(
             prompt,
             model_settings=GoogleModelSettings(
@@ -280,73 +228,6 @@ class CliManager:
 
     def __init__(self):
         self.ai_agent = AiCodeAgent()
-
-    def _get_git_files(self, directory: str) -> List[str]:
-        """Gets the list of files tracked by Git."""
-        try:
-            logging.info(f"🔍 Searching for git files in: {directory}")
-            result = subprocess.run(
-                ['git', 'ls-files'], cwd=directory, capture_output=True, text=True, check=True
-            )
-            files = result.stdout.strip().split('\n')
-            logging.info(f"✅ Found {len(files)} files tracked by git.")
-            return files
-        except FileNotFoundError:
-            logging.error("❌ 'git' command not found. Is Git installed and in your PATH?")
-            return []
-        except subprocess.CalledProcessError as e:
-            logging.error(f"❌ Error executing 'git ls-files': {e.stderr}")
-            return []
-
-    def _read_file_content(self, directory: str, file_path: str) -> Optional[str]:
-        """Safely reads the content of a single file."""
-        full_path = os.path.join(directory, file_path)
-        try:
-            with open(full_path, 'r', encoding='utf-8') as f:
-                return f.read()
-        except FileNotFoundError:
-            logging.warning(f"⚠️ File not found while reading: {full_path}")
-            return None
-        except Exception as e:
-            logging.error(f"❌ Error reading file {full_path}: {e}")
-            return None
-
-    def _write_file_content(self, directory: str, file_path: str, content: str):
-        """Writes content to a file, creating directories if necessary."""
-        full_path = os.path.join(directory, file_path)
-        try:
-            # Ensure the directory exists
-            os.makedirs(os.path.dirname(full_path), exist_ok=True)
-            with open(full_path, 'w', encoding='utf-8') as f:
-                f.write(content)
-            logging.info(f"✅ Successfully wrote changes to {full_path}")
-        except Exception as e:
-            logging.error(f"❌ Error writing to file {full_path}: {e}")
-            
-    def _build_context_from_dict(self, context_data: Dict[str, str], exclude_file: Optional[str] = None) -> str:
-        """Builds a context string from a dictionary of file contents, summarizing if too large."""
-        
-        files_to_process = {
-            k: v for k, v in context_data.items() if k != exclude_file
-        }
-        
-        total_size = sum(len(content) for content in files_to_process.values())
-
-        context_source = f"(from {len(files_to_process)} files, excluding {exclude_file})" if exclude_file else f"(from {len(files_to_process)} files)"
-
-        if total_size > CONTEXT_SIZE_LIMIT:
-            logging.warning(f"Context size {context_source} is {total_size} chars, exceeding limit of {CONTEXT_SIZE_LIMIT}. Summarizing...")
-            context_parts: List[str] = []
-            for file_path, content in files_to_process.items():
-                summary = self.ai_agent.summarize_code(file_path, content)
-                context_parts.append(f"--- Summary of {file_path} ---\n{summary}\n")
-            return "\n".join(context_parts)
-        else:
-            logging.info(f"Context size {context_source} is {total_size} chars. Using full file contents.")
-            context_parts = []
-            for file_path, content in files_to_process.items():
-                context_parts.append(f"--- Content of {file_path} ---\n{content}\n")
-            return "\n".join(context_parts)
     
     def run(self):
         """The main entry point for the CLI tool."""
@@ -374,8 +255,8 @@ class CliManager:
         args = parser.parse_args()
 
         # --- 1. Initial Setup ---
-        app_desc_content = self._read_file_content(args.dir, args.app_description) or ""
-        git_files = self._get_git_files(args.dir)
+        app_desc_content = read_file_content(args.dir, args.app_description) or ""
+        git_files = get_git_files(args.dir)
         if not git_files:
             return
 
@@ -434,7 +315,7 @@ class CliManager:
             context_data: Dict[str, str] = {}
             logging.info("Pre-loading context from disk for dynamic updates...")
             for fp in files_for_context:
-                content = self._read_file_content(args.dir, fp)
+                content = read_file_content(args.dir, fp)
                 if content is not None:
                     context_data[fp] = content
             
@@ -442,7 +323,9 @@ class CliManager:
             reanalysis_needed = False
 
             for file_path in all_files_to_process:
-                full_context = self._build_context_from_dict(context_data, exclude_file=file_path)
+                full_context = build_context_from_dict(
+                    context_data, self.ai_agent.summarize_code, exclude_file=file_path
+                )
                 
                 original_content = context_data.get(file_path)
                 
@@ -456,7 +339,7 @@ class CliManager:
                     reanalysis_needed = True
                     break # Exit the for loop to start the while loop again with re-analysis
                 else:
-                    self._write_file_content(args.dir, file_path, generated_code.code)
+                    write_file_content(args.dir, file_path, generated_code.code)
                     # Update context with the newly generated code for subsequent steps in this loop
                     context_data[file_path] = generated_code.code
                     processed_in_this_loop.append(file_path)

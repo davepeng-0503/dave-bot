@@ -108,7 +108,7 @@ You are an expert code analyst. Your task is to summarize the provided code.
 Focus on the file's primary purpose, its key functions, classes, and their responsibilities. 
 Mention any important logic or side effects. The summary should be concise and informative.
 """
-        prompt = f"Please summarize the following code from the file `{file_path}`:"
+        prompt = f"Please summarize the following code from the file `{file_path}`: {code_content}"
         summarizer_agent = Agent(
             self._get_gemini_model("gemini-2.5-flash"),
             output_type=str,
