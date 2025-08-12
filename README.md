@@ -49,8 +49,8 @@ There are two primary agents in this suite:
 
 1.  **Clone the repository:**
     ```bash
-    git clone <repository-url>
-    cd <repository-name>
+    git clone https://github.com/davepeng-0503/dave-bot.git
+    cd dave-bot
     ```
 
 2.  **Install dependencies:**
@@ -59,9 +59,9 @@ There are two primary agents in this suite:
     python -m venv venv
     source venv/bin/activate  # On Windows use `venv\Scripts\activate`
     ```
-    Install the required packages. (Note: A `requirements.txt` file is not provided, but these are the core dependencies).
+    Install the required packages from `requirements.txt`.
     ```bash
-    pip install pydantic-ai google-generativeai python-dotenv
+    pip install -r requirements.txt
     ```
 
 3.  **Set up your API Key:**
@@ -126,4 +126,7 @@ python code_review_agent.py --task "Reviewing the bugfix for ticket #123" --comp
 *   `code_review_agent.py`: The main script for the automated code review agent.
 *   `shared_agents_utils.py`: Common utilities for file I/O, Git operations, and base AI agent configuration (model setup, context building).
 *   `app_description.txt`: A high-level description of the project to provide context to the agents.
+*   `requirements.txt`: A list of Python packages required to run the agents.
 *   `LICENSE`: The license for the project.
+
+---
