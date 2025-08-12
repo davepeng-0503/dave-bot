@@ -4,7 +4,6 @@ import json
 import logging
 import os
 import subprocess
-from functools import partial
 from typing import Dict, List, Optional, Set
 
 from pydantic import BaseModel, Field
@@ -21,6 +20,9 @@ from shared_agents_utils import (
 
 # --- Configuration ---
 MAX_REANALYSIS_RETRIES = 3
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 
 # --- Pydantic Models for Code Analysis & Generation ---
@@ -85,41 +87,36 @@ class GeneratedCode(BaseModel):
 class AiCodeAgent(BaseAiAgent):
     """Handles all interactions with the Gemini AI model."""
 
-    def _git_grep_search_tool(self, query: str, directory: str) -> str:
-        """
-        Performs a case-insensitive 'git grep' search in the codebase to find relevant files.
-        Returns a list of files and line numbers containing the query.
-        """
-        logging.info(f"🛠️ Running git grep search for: '{query}'")
-        try:
-            result = subprocess.run(
-                ['git', 'grep', '-i', '-n', query],
-                cwd=directory,
-                capture_output=True,
-                text=True,
-                check=False
-            )
-            if result.returncode == 0:
-                return f"Git grep results for '{query}':\n{result.stdout}"
-            elif result.returncode == 1:
-                return f"No results found for '{query}'."
-            else:
-                logging.error(f"Error during git grep: {result.stderr}")
-                return f"Error executing git grep: {result.stderr}"
-        except FileNotFoundError:
-            logging.error("❌ 'git' command not found. Is Git installed?")
-            return "Error: 'git' command not found. Cannot perform search."
-        except Exception as e:
-            logging.error(f"An unexpected error occurred during git grep: {e}")
-            return f"An unexpected error occurred: {e}"
-
     def get_initial_analysis(self, task: str, file_list: List[str], directory: str, app_description: str = "", feedback: Optional[str] = None) -> CodeAnalysis:
         """Runs the agent to get the code analysis, potentially using feedback or a search tool."""
         
-        # The tool's signature for pydantic-ai should only be `(query: str)`.
-        # We use partial to bind the `directory` argument.
-        bound_git_grep_search_tool = partial(self._git_grep_search_tool, directory=directory)
-        bound_git_grep_search_tool.__doc__ = self._git_grep_search_tool.__doc__
+        def git_grep_search_tool(query: str) -> str:
+            """
+            Performs a case-insensitive 'git grep' search in the codebase to find relevant files.
+            Returns a list of files and line numbers containing the query.
+            """
+            logging.info(f"🛠️ Running git grep search for: '{query}'")
+            try:
+                result = subprocess.run(
+                    ['git', 'grep', '-i', '-n', query],
+                    cwd=directory,
+                    capture_output=True,
+                    text=True,
+                    check=False
+                )
+                if result.returncode == 0:
+                    return f"Git grep results for '{query}':\n{result.stdout}"
+                elif result.returncode == 1:
+                    return f"No results found for '{query}'."
+                else:
+                    logging.error(f"Error during git grep: {result.stderr}")
+                    return f"Error executing git grep: {result.stderr}"
+            except FileNotFoundError:
+                logging.error("❌ 'git' command not found. Is Git installed?")
+                return "Error: 'git' command not found. Cannot perform search."
+            except Exception as e:
+                logging.error(f"An unexpected error occurred during git grep: {e}")
+                return f"An unexpected error occurred: {e}"
 
         system_prompt = f"""
 You are an expert software developer planning a coding task. Your goal is to analyze a project's file structure 
@@ -165,7 +162,7 @@ Please provide your analysis. Use the `git_grep_search_tool` if you need to find
             self._get_gemini_model('gemini-2.5-flash'),
             output_type=CodeAnalysis,
             system_prompt=system_prompt,
-            tools=[bound_git_grep_search_tool]
+            tools=[git_grep_search_tool]
         )
         log_message = "🤖 Conducting initial codebase analysis..." if not feedback else f"🔁 Re-analyzing codebase with feedback: {feedback}"
         logging.info(log_message)
@@ -180,10 +177,6 @@ Please provide your analysis. Use the `git_grep_search_tool` if you need to find
         """Generates the full code for a given file."""
         action = "editing" if original_content is not None else "creating"
         
-        strict_guideline = "You must only make code changes directly related to completion of the task, refactors and cleaning up should not be prioritised unless specifically part of the task given"
-        liberal_guideline = "You may make other changes as you see fit to improve code maintainability and clarity."
-        guideline = strict_guideline if strict else liberal_guideline
-
         system_prompt = f"""
 You are an expert programmer tasked with writing a complete Python file.
 Based on the overall task, the provided context from other relevant files, and the original code (if any), 
@@ -192,7 +185,7 @@ you will generate the full, production-ready code for the specified file path.
 **IMPORTANT RULES**:
 1.  Your output must be the complete, raw code for the file. Do not include markdown backticks (```python ... ```) or any other explanations in the `code` field.
 2.  The code should be well-structured, follow best practices, and be ready for integration.
-3.  {guideline}
+3.  {"You must only make code changes directly related to completion of the task, refactors and cleaning up should not be prioritised unless specifically part of the task given" if strict else "You may make other changes as you see fit to improve code maintainability and clarity."}
 4.  **Context Management**:
     a. **If you cannot generate the code for `{file_path}` due to insufficient context**: Set `requires_more_context` to `true`, leave `code` empty, and explain what you need in `context_request`.
     b. **If you can generate the code for `{file_path}` but you anticipate needing more context for FUTURE files**: Generate the code for the current file. Then, populate the `needed_context_for_future_files` list with the full paths of any other files you will need to see to complete subsequent steps. This is crucial for efficiency.
@@ -237,41 +230,41 @@ Original content of `{file_path}`:
 
 # --- CLI and File Operations ---
 
-def _parse_arguments() -> argparse.Namespace:
-    """Parses command-line arguments."""
-    parser = argparse.ArgumentParser(
-        description="A tool to analyze a git repository and apply AI-generated code changes for a specific task."
-    )
-    parser.add_argument(
-        "--task", type=str, required=True, help="The task description for the AI."
-    )
-    parser.add_argument(
-        "--dir", type=str, default=os.getcwd(), help="The directory of the git repository."
-    )
-    parser.add_argument(
-        "--app-description", type=str, default="app_description.txt",
-        help="Path to a text file describing the app's purpose."
-    )
-    parser.add_argument(
-        "--force", action="store_true",
-        help="Bypass confirmation before overwriting files."
-    )
-    parser.add_argument(
-        '--strict', dest='strict', action='store_true', help="Restrict AI to task-focused changes."
-    )
-    parser.add_argument(
-        '--no-strict', dest='strict', action='store_false', help="Allow AI to make broader improvements."
-    )
-    parser.set_defaults(strict=True)
-    return parser.parse_args()
-
 class CliManager:
     """Manages CLI interactions, file I/O, and orchestrates the analysis and code generation."""
 
-    def __init__(self, args: argparse.Namespace):
+    def __init__(self):
         """Initializes the CLI manager and the AI code agent."""
         self.ai_agent = AiCodeAgent()
-        self.args = args
+        self.args = self._parse_args()
+
+    def _parse_args(self) -> argparse.Namespace:
+        """Parses command-line arguments."""
+        parser = argparse.ArgumentParser(
+            description="A tool to analyze a git repository and apply AI-generated code changes for a specific task."
+        )
+        parser.add_argument(
+            "--task", type=str, required=True, help="The task description for the AI."
+        )
+        parser.add_argument(
+            "--dir", type=str, default=os.getcwd(), help="The directory of the git repository."
+        )
+        parser.add_argument(
+            "--app-description", type=str, default="app_description.txt",
+            help="Path to a text file describing the app's purpose."
+        )
+        parser.add_argument(
+            "--force", action="store_true",
+            help="Bypass confirmation before overwriting files."
+        )
+        parser.add_argument(
+            '--strict', dest='strict', action='store_true', help="Restrict AI to task-focused changes."
+        )
+        parser.add_argument(
+            '--no-strict', dest='strict', action='store_false', help="Allow AI to make broader improvements."
+        )
+        parser.set_defaults(strict=True)
+        return parser.parse_args()
 
     def _get_all_repository_files(self) -> List[str]:
         """Gets all tracked and untracked files in the repository."""
@@ -428,13 +421,6 @@ class CliManager:
         self._report_final_status(unprocessed_files)
 
 
-def main():
-    """Main entry point of the script."""
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-    args = _parse_arguments()
-    cli = CliManager(args)
-    cli.run()
-
-
 if __name__ == "__main__":
-    main()
+    cli = CliManager()
+    cli.run()
