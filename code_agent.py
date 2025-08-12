@@ -231,7 +231,7 @@ class CliManager:
     
     def run(self):
         """The main entry point for the CLI tool."""
-        task = "Can you make the static photo URL in restaurant_service.py still match the sizes given in the request?"
+        task = ""
 
         parser = argparse.ArgumentParser(
             description="A tool to analyze a git repository and apply AI-generated code changes for a specific task."
