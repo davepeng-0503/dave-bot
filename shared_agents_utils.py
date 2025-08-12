@@ -132,6 +132,7 @@ class BaseAiAgent:
     and common AI-related tasks like summarization.
     """
     summarizer_agent: Agent
+    api_key: str
 
     def __init__(self):
         """
@@ -139,7 +140,7 @@ class BaseAiAgent:
         a summarizer agent instance for reuse.
         """
         load_dotenv()
-        self.api_key = os.getenv("GOOGLE_API_KEY")
+        self.api_key = os.getenv("GOOGLE_API_KEY") or ""
         if not self.api_key:
             raise ValueError(
                 "GOOGLE_API_KEY is not set. Please create a .env file and add it."
