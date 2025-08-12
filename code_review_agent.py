@@ -296,11 +296,18 @@ class CliManager:
             help="The git branch to compare against (e.g., 'origin/main'). If provided, reviews committed and local changes against this branch."
         )
         parser.add_argument(
-            "--strict",
-            type=lambda x: (str(x).lower() == 'true'),
-            default=True,
-            help="Whether the AI should restrict comments to only those needed for the task (default: True). Use --strict=false for more liberal feedback."
+            '--strict',
+            dest='strict',
+            action='store_true',
+            help="Restrict comments to only those related to the task (default)."
         )
+        parser.add_argument(
+            '--no-strict',
+            dest='strict',
+            action='store_false',
+            help="Allow more liberal feedback on code style, refactors, etc."
+        )
+        parser.set_defaults(strict=True)
         args = parser.parse_args()
 
         # --- 1. Initial Setup ---
