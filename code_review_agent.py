@@ -4,7 +4,7 @@ import json
 import logging
 import os
 import subprocess
-from typing import Dict, List, Literal
+from typing import Dict, List, Literal, Optional, Tuple
 
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
@@ -16,6 +16,10 @@ from shared_agents_utils import (
     get_git_files,
     read_file_content,
 )
+
+# --- Configuration ---
+MAX_REANALYSIS_RETRIES = 3
+
 
 # --- Pydantic Models for Code Review ---
 
@@ -58,7 +62,7 @@ class AiCodeReviewAgent(BaseAiAgent):
     """Handles all AI interactions for conducting a code review."""
 
     def get_review_analysis(
-        self, task: str, all_files: List[str], changed_files: List[str], app_description: str = ""
+        self, task: str, all_files: List[str], changed_files: List[str], app_description: str = "", feedback: Optional[str] = None
     ) -> ReviewAnalysis:
         """Determines which files to review and which are needed for context."""
         system_prompt = f"""
@@ -77,6 +81,14 @@ Your task is to populate the `ReviewAnalysis` object based on the user's request
 
 Provide a clear `reasoning` for your choices.
 """
+        if feedback:
+            system_prompt += f"""
+---
+IMPORTANT: This is a re-analysis. A previous review attempt failed due to insufficient context.
+The reviewer's feedback was: "{feedback}"
+Please adjust your file selection. You MUST add more files to `relevant_context_files` to satisfy the context request.
+---
+"""
         prompt = f"""
 Full list of files in the repository:
 {json.dumps(all_files, indent=2)}
@@ -89,11 +101,12 @@ The task or pull request description is: "{task}"
 Please provide your analysis of which files to review and which to use for context.
 """
         analysis_agent = Agent(
-            self._get_gemini_model("gemini-2.5-flash"),
+            self._get_gemini_model("gemini-1.5-flash"),
             output_type=ReviewAnalysis,
             system_prompt=system_prompt,
         )
-        logging.info("🤖 Conducting initial review analysis...")
+        log_message = "🤖 Conducting initial review analysis..." if not feedback else f"🔁 Re-analyzing review plan with feedback: {feedback}"
+        logging.info(log_message)
         
         analysis = analysis_agent.run_sync(
             prompt,
@@ -163,13 +176,49 @@ Please provide your complete and thorough review for this file in the specified 
 
 # --- CLI and Orchestration ---
 
-class ReviewOrchestrator:
+class ReviewCliManager:
     """Manages CLI interactions and orchestrates the code review process."""
 
-    def __init__(self, args: argparse.Namespace):
+    def __init__(self):
+        self.args = self._parse_arguments()
         self.ai_agent = AiCodeReviewAgent()
-        self.args = args
-        self.directory = args.dir
+        self.directory = self.args.dir
+
+    def _parse_arguments(self) -> argparse.Namespace:
+        """Parses command-line arguments for the code review agent."""
+        parser = argparse.ArgumentParser(
+            description="An AI agent that reviews code changes in a git repository. It can review local uncommitted changes or all changes against a specified branch."
+        )
+        parser.add_argument(
+            "--task", type=str, required=True,
+            help="The task description or goal of the changes for the AI to review against."
+        )
+        parser.add_argument(
+            "--dir", type=str, default=os.getcwd(),
+            help="The directory of the git repository."
+        )
+        parser.add_argument(
+            "--app-description", type=str, default="app_description.txt",
+            help="Path to a text file describing the app's purpose for better context."
+        )
+        parser.add_argument(
+            "--compare", type=str, default=None,
+            help="The git branch to compare against (e.g., 'origin/main'). If provided, reviews committed and local changes against this branch."
+        )
+        parser.add_argument(
+            "--force", action="store_true",
+            help="Bypass confirmation before starting the review."
+        )
+        parser.add_argument(
+            '--strict', dest='strict', action='store_true',
+            help="Restrict comments to only those related to the task (default)."
+        )
+        parser.add_argument(
+            '--no-strict', dest='strict', action='store_false',
+            help="Allow more liberal feedback on code style, refactors, etc."
+        )
+        parser.set_defaults(strict=True)
+        return parser.parse_args()
 
     def _run_git_command(self, command: List[str]) -> List[str]:
         """Runs a git command and returns its output split by lines."""
@@ -222,18 +271,17 @@ class ReviewOrchestrator:
             return []
 
     def _print_review_summary(self, reviews: List[FileReview]):
-        """Prints the formatted review results."""
+        """Prints the formatted review results for successfully reviewed files."""
         print("\n\n--- 📝 AI Code Review Summary ---")
+        if not reviews:
+            print("\nNo files were successfully reviewed.")
+            return
+            
         total_comments = 0
         for review in reviews:
             print("\n" + "="*80)
             print(f"📄 FILE: {review.file_path}")
             print("="*80)
-
-            if review.requires_more_context:
-                print("⚠️ CONTEXT REQUIRED:")
-                print(f"   {review.context_request}")
-                continue
 
             if review.general_feedback:
                 print(f"\n💡 General Feedback:\n   {review.general_feedback}\n")
@@ -249,7 +297,7 @@ class ReviewOrchestrator:
                 print(f"  - L{comment.line_number} [{comment.severity.upper()}]: {comment.comment}")
         
         print("\n" + "="*80)
-        print(f"✨ Review complete. Found {total_comments} total comments across {len(reviews)} files.")
+        print(f"✨ Review complete for {len(reviews)} files. Found {total_comments} total comments.")
         print("="*80)
 
     def _print_analysis_plan(self, analysis: ReviewAnalysis):
@@ -261,39 +309,82 @@ class ReviewOrchestrator:
         print("Files for Context:", analysis.relevant_context_files or "None")
         print("--------------------------\n")
 
-    def _execute_reviews(self, analysis: ReviewAnalysis) -> List[FileReview]:
-        """Loads context and iterates through files to perform reviews."""
-        files_for_context = list(set(analysis.relevant_context_files + analysis.files_to_review))
+    def _execute_review_loop(self, analysis: ReviewAnalysis, all_git_files: List[str], original_changed_files: List[str], app_desc_content: str) -> Tuple[List[FileReview], List[str]]:
+        """
+        Manages the iterative process of reviewing files, handling context requests, and re-analyzing on failure.
+        Returns a tuple of (successful_reviews, unprocessed_files).
+        """
+        files_to_process = analysis.files_to_review
         context_data: Dict[str, str] = {}
-        logging.info("Pre-loading all file contents for review context...")
-        for fp in files_for_context:
-            content = read_file_content(self.directory, fp)
-            if content is not None:
-                context_data[fp] = content
-            else:
-                logging.warning(f"Could not read file {fp}, it will be excluded from context.")
-
+        feedback_for_reanalysis = ""
+        retries = 0
         all_reviews: List[FileReview] = []
-        for file_to_review in analysis.files_to_review:
-            if file_to_review not in context_data:
-                logging.error(f"Cannot review {file_to_review} as its content could not be read.")
-                continue
 
-            full_context = build_context_from_dict(
-                context_data, self.ai_agent.summarize_code, exclude_file=file_to_review
-            )
+        while files_to_process and retries <= MAX_REANALYSIS_RETRIES:
+            if feedback_for_reanalysis:
+                logging.info("--- Re-running Analysis with Feedback ---")
+                analysis = self.ai_agent.get_review_analysis(
+                    self.args.task, all_git_files, original_changed_files, app_desc_content, feedback=feedback_for_reanalysis
+                )
+                self._print_analysis_plan(analysis)
+                files_to_process = analysis.files_to_review
+                feedback_for_reanalysis = ""
+
+            files_for_context = list(set(analysis.relevant_context_files + files_to_process))
+            for fp in files_for_context:
+                if fp not in context_data:
+                    content = read_file_content(self.directory, fp)
+                    if content is not None:
+                        context_data[fp] = content
             
-            file_content = context_data[file_to_review]
-            
-            review_result = self.ai_agent.review_file_content(
-                self.args.task, full_context, file_to_review, file_content, strict=self.args.strict
-            )
-            all_reviews.append(review_result)
-        return all_reviews
+            processed_in_loop: List[str] = []
+            reanalysis_needed = False
+
+            for file_to_review in files_to_process:
+                if file_to_review not in context_data:
+                    logging.error(f"Cannot review {file_to_review} as its content could not be read. Skipping.")
+                    processed_in_loop.append(file_to_review)
+                    continue
+
+                full_context = build_context_from_dict(
+                    context_data, self.ai_agent.summarize_code, exclude_file=file_to_review
+                )
+                file_content = context_data[file_to_review]
+                
+                review_result = self.ai_agent.review_file_content(
+                    self.args.task, full_context, file_to_review, file_content, strict=self.args.strict
+                )
+
+                if review_result.requires_more_context:
+                    logging.warning(f"Reviewer needs more context for {file_to_review}: {review_result.context_request}")
+                    feedback_for_reanalysis = review_result.context_request
+                    retries += 1
+                    reanalysis_needed = True
+                    break
+
+                all_reviews.append(review_result)
+                processed_in_loop.append(file_to_review)
+
+            successfully_reviewed_files = {r.file_path for r in all_reviews}
+            files_to_process = [f for f in analysis.files_to_review if f not in successfully_reviewed_files]
+
+            if not reanalysis_needed:
+                break
+
+        return all_reviews, files_to_process
+
+    def _report_final_status(self, unprocessed_files: List[str]):
+        """Prints the final status of the code review task."""
+        if unprocessed_files:
+            logging.error(f"\n❌ Failed to complete the review for all files after {MAX_REANALYSIS_RETRIES} retries.")
+            logging.error("The following files were not processed:")
+            for file_path in unprocessed_files:
+                logging.error(f"  - {file_path}")
+        else:
+            logging.info("✅ All planned files were successfully reviewed.")
 
     def run(self):
         """The main entry point for orchestrating the code review."""
-        # 1. Initial Setup
         app_desc_content = read_file_content(self.directory, self.args.app_description) or ""
         all_git_files = get_git_files(self.directory)
         if not all_git_files:
@@ -307,12 +398,15 @@ class ReviewOrchestrator:
                 logging.info("No local changes detected. Exiting.")
             return
 
-        # 2. Initial Analysis
         analysis = self.ai_agent.get_review_analysis(
             self.args.task, all_git_files, changed_files, app_desc_content
         )
         
         self._print_analysis_plan(analysis)
+
+        if not analysis.files_to_review:
+            logging.info("AI analysis concluded no files need review. Exiting.")
+            return
 
         if not self.args.force:
             proceed = input("Proceed with AI code review? (y/n): ").lower()
@@ -320,54 +414,18 @@ class ReviewOrchestrator:
                 logging.info("Operation cancelled by user.")
                 return
 
-        # 3. Execute Reviews
-        all_reviews = self._execute_reviews(analysis)
+        successful_reviews, unprocessed_files = self._execute_review_loop(
+            analysis, all_git_files, changed_files, app_desc_content
+        )
 
-        # 4. Print Final Report
-        self._print_review_summary(all_reviews)
-
-def parse_arguments() -> argparse.Namespace:
-    """Parses command-line arguments for the code review agent."""
-    parser = argparse.ArgumentParser(
-        description="An AI agent that reviews code changes in a git repository. It can review local uncommitted changes or all changes against a specified branch."
-    )
-    parser.add_argument(
-        "--task", type=str, required=True,
-        help="The task description or goal of the changes for the AI to review against."
-    )
-    parser.add_argument(
-        "--dir", type=str, default=os.getcwd(),
-        help="The directory of the git repository."
-    )
-    parser.add_argument(
-        "--app-description", type=str, default="app_description.txt",
-        help="Path to a text file describing the app's purpose for better context."
-    )
-    parser.add_argument(
-        "--compare", type=str, default=None,
-        help="The git branch to compare against (e.g., 'origin/main'). If provided, reviews committed and local changes against this branch."
-    )
-    parser.add_argument(
-        "--force", action="store_true",
-        help="Bypass confirmation before starting the review."
-    )
-    parser.add_argument(
-        '--strict', dest='strict', action='store_true',
-        help="Restrict comments to only those related to the task (default)."
-    )
-    parser.add_argument(
-        '--no-strict', dest='strict', action='store_false',
-        help="Allow more liberal feedback on code style, refactors, etc."
-    )
-    parser.set_defaults(strict=True)
-    return parser.parse_args()
+        self._print_review_summary(successful_reviews)
+        self._report_final_status(unprocessed_files)
 
 def main():
     """Main entry point of the script."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-    args = parse_arguments()
-    orchestrator = ReviewOrchestrator(args)
-    orchestrator.run()
+    cli = ReviewCliManager()
+    cli.run()
 
 if __name__ == "__main__":
     main()

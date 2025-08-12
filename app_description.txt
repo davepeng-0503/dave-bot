@@ -1,4 +1,4 @@
-This repository contains a suite of AI-powered developer assistant tools designed to automate parts of the software development lifecycle. The tools are built in Python and leverage Google's Gemini models via the `pydantic-ai` library to understand and manipulate code within a git repository.
+This repository contains a suite of AI-powered developer assistant tools designed to automate parts of the software development lifecycle. The tools are built in Python and leverage Google's Gemini 2.5 series of models via the `pydantic-ai` library to understand and manipulate code within a git repository.
 
 There are two primary agents:
 
@@ -9,6 +9,9 @@ There are two primary agents:
         2.  It can use a `git grep` tool to search the codebase for specific keywords or functions to improve its analysis.
         3.  It then iteratively generates or modifies files one by one, according to its plan.
         4.  It has a sophisticated context management system. If it lacks the necessary information to generate a file, it can request more context and trigger a re-analysis of its plan. It can also request context for future generation steps to improve efficiency.
+    *   **Key Pydantic Models**:
+        *   `CodeAnalysis`: Defines the structure for the initial plan, including files to read, edit, and create, along with a generation order.
+        *   `GeneratedCode`: Defines the output structure for file generation, including the code itself and context management fields.
     *   **Usage**: Run from the command line with a `--task` argument describing the desired change.
 
 2.  **Code Review Agent (`code_review_agent.py`)**:
@@ -17,6 +20,10 @@ There are two primary agents:
         1.  It identifies changed files in the repository (either local uncommitted changes or changes relative to a specific branch like `main`).
         2.  It performs an analysis to determine which other files are needed as context to understand the changes.
         3.  It then reviews each changed file, providing line-specific comments, severity levels, and general feedback.
+        4.  Like the Code Agent, it can request more context if a review is not possible and re-run its analysis to create a better plan.
+    *   **Key Pydantic Models**:
+        *   `ReviewAnalysis`: Defines the structure for the initial review plan, identifying files to review and files for context.
+        *   `FileReview`: Defines the output for a single file's review, containing comments, feedback, and context requests.
     *   **Usage**: Run from the command line with a `--task` argument describing the goal of the changes under review.
 
 **Shared Utilities (`shared_agents_utils.py`)**:

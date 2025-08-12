@@ -29,7 +29,6 @@ DISABLED_HARM_CATEGORIES: List[HarmCategory] = [
     HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
     HarmCategory.HARM_CATEGORY_HARASSMENT,
     HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-    HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY,
 ]
 
 
@@ -132,15 +131,31 @@ class BaseAiAgent:
     A base class for AI agents, handling API key loading, model configuration,
     and common AI-related tasks like summarization.
     """
+    summarizer_agent: Agent
 
     def __init__(self):
-        """Initializes the agent by loading the Google API key from .env file."""
+        """
+        Initializes the agent by loading the Google API key and pre-creating
+        a summarizer agent instance for reuse.
+        """
         load_dotenv()
         self.api_key = os.getenv("GOOGLE_API_KEY")
         if not self.api_key:
             raise ValueError(
                 "GOOGLE_API_KEY is not set. Please create a .env file and add it."
             )
+
+        # Create a cached summarizer agent for performance.
+        summarizer_system_prompt = """
+You are an expert code analyst. Your task is to summarize the provided code.
+Focus on the file's primary purpose, its key functions, classes, and their responsibilities.
+Mention any important logic or side effects. The summary should be concise and informative.
+"""
+        self.summarizer_agent = Agent(
+            self._get_gemini_model("gemini-2.5-flash"),
+            output_type=str,
+            system_prompt=summarizer_system_prompt,
+        )
 
     def _get_gemini_model(
         self, model_name: str, temperature: float = 0.2
@@ -155,10 +170,7 @@ class BaseAiAgent:
         Returns:
             An instance of the configured GoogleModel.
         """
-        if not self.api_key:
-            raise ValueError(
-                "GOOGLE_API_KEY is not set. Please create a .env file and add it."
-            )
+        # The API key is validated in the constructor, so no need to check here.
         return GoogleModel(
             model_name,
             provider=GoogleProvider(api_key=self.api_key),
@@ -181,7 +193,7 @@ class BaseAiAgent:
 
     def summarize_code(self, file_path: str, code_content: str) -> str:
         """
-        Summarizes a single file's code content using an AI model.
+        Summarizes a single file's code content using a cached AI model.
 
         Args:
             file_path: The path of the file being summarized (for context).
@@ -190,23 +202,10 @@ class BaseAiAgent:
         Returns:
             A string containing the AI-generated summary.
         """
-        system_prompt = """
-You are an expert code analyst. Your task is to summarize the provided code.
-Focus on the file's primary purpose, its key functions, classes, and their responsibilities.
-Mention any important logic or side effects. The summary should be concise and informative.
-"""
         prompt = f"Please summarize the following code from the file `{file_path}`:\n\n{code_content}"
 
-        # Note: A new agent is instantiated for each summarization call.
-        # This is acceptable for now as it keeps the summarization logic self-contained,
-        # but could be optimized if summarization becomes a high-frequency operation.
-        summarizer_agent = Agent(
-            self._get_gemini_model("gemini-1.5-flash"),
-            output_type=str,
-            system_prompt=system_prompt,
-        )
         logging.info(f"📝 Summarizing code in {file_path}...")
-        summary = summarizer_agent.run_sync(
+        summary = self.summarizer_agent.run_sync(
             prompt,
             model_settings=GoogleModelSettings(
                 google_safety_settings=self.get_safety_settings()
