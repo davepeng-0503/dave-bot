@@ -8,8 +8,7 @@ from typing import Dict, List, Optional, Set
 
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
-from pydantic_ai.models.google import GoogleModel, GoogleModelSettings
-from pydantic_ai.providers.google import GoogleProvider
+from pydantic_ai.models.google import GoogleModelSettings
 
 from shared_agents_utils import (
     BaseAiAgent,
@@ -69,11 +68,15 @@ class GeneratedCode(BaseModel):
     reasoning: str = Field(description="A brief explanation of the changes made or the file's purpose.")
     requires_more_context: bool = Field(
         default=False,
-        description="Set to true if you cannot generate the code due to insufficient context."
+        description="Set to true if you cannot generate the code for the CURRENT file due to insufficient context."
     )
     context_request: str = Field(
         default="",
-        description="If requires_more_context is true, explain what specific information or files are needed."
+        description="If requires_more_context is true, explain what specific information or files are needed to generate the CURRENT file."
+    )
+    needed_context_for_future_files: List[str] = Field(
+        default=[],
+        description="A list of additional file paths that should be added to the context for subsequent file generation steps. Use this even if you were able to generate the current file successfully. Provide file paths from the full list of repository files."
     )
 
 
@@ -171,7 +174,7 @@ Please provide your analysis. Use the `git_grep_search_tool` if you need to find
         )
         return analysis.output
 
-    def generate_file_content(self, task: str, context: str, file_path: str, original_content: Optional[str] = None, strict: bool = True) -> GeneratedCode:
+    def generate_file_content(self, task: str, context: str, file_path: str, all_repo_files: List[str], generation_order: List[str], original_content: Optional[str] = None, strict: bool = True) -> GeneratedCode:
         """Generates the full code for a given file."""
         action = "editing" if original_content is not None else "creating"
         
@@ -184,13 +187,17 @@ you will generate the full, production-ready code for the specified file path.
 1.  Your output must be the complete, raw code for the file. Do not include markdown backticks (```python ... ```) or any other explanations in the `code` field.
 2.  The code should be well-structured, follow best practices, and be ready for integration.
 3.  {"You must only make code changes directly related to completion of the task, refactors and cleaning up should not be prioritised unless specifically part of the task given" if strict else "You may make other changes as you see fit to improve code maintainability and clarity."}
-4.  If the provided context is insufficient for you to complete the task for `{file_path}`, you MUST:
-    a. Set the `requires_more_context` flag to `true`.
-    b. Leave the `code` field empty.
-    c. In the `context_request` field, clearly and specifically explain what additional files or information you need to proceed. For example: "I need to see the contents of `utils/database.py` to understand how to query the database."
+4.  **Context Management**:
+    a. **If you cannot generate the code for `{file_path}` due to insufficient context**: Set `requires_more_context` to `true`, leave `code` empty, and explain what you need in `context_request`.
+    b. **If you can generate the code for `{file_path}` but you anticipate needing more context for FUTURE files**: Generate the code for the current file. Then, populate the `needed_context_for_future_files` list with the full paths of any other files you will need to see to complete subsequent steps. This is crucial for efficiency.
 """
         prompt = f"""
 Overall Task: "{task}"
+
+Full list of files in the repository:
+{json.dumps(all_repo_files, indent=2)}
+
+Remaining generation order: {generation_order}
 
 Context from other relevant files in the project:
 ---
@@ -206,7 +213,7 @@ Original content of `{file_path}`:
 {original_content}
 ---
 """
-        prompt += "\nPlease generate the complete, new source code for this file. If you lack context, please request it."
+        prompt += "\nPlease generate the complete, new source code for this file. If you lack context for this file or foresee needing context for future files, please request it."
 
         # Use a more powerful model for code generation
         generation_agent = Agent(self._get_gemini_model('gemini-2.5-pro'), output_type=GeneratedCode, system_prompt=system_prompt)
@@ -258,10 +265,33 @@ class CliManager:
         app_desc_content = read_file_content(args.dir, args.app_description) or ""
         git_files = get_git_files(args.dir)
         if not git_files:
+            logging.warning("No files tracked by git were found.")
+
+        # Get untracked files as well to give the AI full context
+        try:
+            untracked_result = subprocess.run(
+                ["git", "ls-files", "--others", "--exclude-standard"],
+                cwd=args.dir,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if untracked_result.returncode == 0 and untracked_result.stdout:
+                untracked_files = untracked_result.stdout.strip().split("\n")
+                logging.info(f"Found {len(untracked_files)} untracked files.")
+                all_repo_files = sorted(list(set(git_files + untracked_files)))
+            else:
+                all_repo_files = git_files
+        except Exception as e:
+            logging.warning(f"Could not get untracked git files: {e}")
+            all_repo_files = git_files
+
+        if not all_repo_files:
+            logging.error("No tracked or untracked files found in the repository. Exiting.")
             return
 
         # --- 2. Initial Analysis ---
-        analysis = self.ai_agent.get_initial_analysis(args.task, git_files, args.dir, app_desc_content)
+        analysis = self.ai_agent.get_initial_analysis(args.task, all_repo_files, args.dir, app_desc_content)
         
         print("\n--- AI Code Analysis Result ---")
         print(f"Task: {args.task}\n")
@@ -304,7 +334,7 @@ class CliManager:
             if feedback_for_next_loop:
                 # Re-analyze with feedback
                 analysis = self.ai_agent.get_initial_analysis(
-                    args.task, git_files, args.dir, app_desc_content, feedback=feedback_for_next_loop
+                    args.task, all_repo_files, args.dir, app_desc_content, feedback=feedback_for_next_loop
                 )
                 # We update the full list of files to process based on the new analysis
                 all_files_to_process = analysis.generation_order
@@ -329,7 +359,18 @@ class CliManager:
                 
                 original_content = context_data.get(file_path)
                 
-                generated_code = self.ai_agent.generate_file_content(args.task, full_context, file_path, original_content, strict=args.strict)
+                # The current list of files to process is the remaining generation order
+                remaining_generation_order = [f for f in all_files_to_process if f not in processed_in_this_loop]
+
+                generated_code = self.ai_agent.generate_file_content(
+                    args.task,
+                    full_context,
+                    file_path,
+                    all_repo_files,
+                    remaining_generation_order,
+                    original_content,
+                    strict=args.strict
+                )
 
                 if generated_code.requires_more_context:
                     logging.warning(f"Generator needs more context for file {file_path}.")
@@ -343,6 +384,22 @@ class CliManager:
                     # Update context with the newly generated code for subsequent steps in this loop
                     context_data[file_path] = generated_code.code
                     processed_in_this_loop.append(file_path)
+
+                    # Handle request for more context for FUTURE files
+                    if generated_code.needed_context_for_future_files:
+                        logging.info(
+                            f"Agent requested additional context for future steps: {generated_code.needed_context_for_future_files}"
+                        )
+                        for new_context_file in generated_code.needed_context_for_future_files:
+                            if new_context_file not in context_data:
+                                content = read_file_content(args.dir, new_context_file)
+                                if content is not None:
+                                    logging.info(f"Loading '{new_context_file}' into context.")
+                                    context_data[new_context_file] = content
+                                else:
+                                    logging.warning(
+                                        f"AI requested context for a non-existent file: {new_context_file}. Ignoring."
+                                    )
 
             # Update the list of files that still need processing
             all_files_to_process = [f for f in all_files_to_process if f not in processed_in_this_loop]
