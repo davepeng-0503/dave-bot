@@ -1,29 +1,70 @@
 #!/usr/bin/env python
+"""
+Utilities shared across different AI agents, including file operations,
+base AI agent configuration, and context management.
+"""
 import logging
 import os
 import subprocess
 from typing import Callable, Dict, List, Optional
 
 from dotenv import load_dotenv
-from google.genai.types import HarmBlockThreshold, HarmCategory, SafetySettingDict
+from google.genai.types import (
+    HarmBlockThreshold,
+    HarmCategory,
+    SafetySettingDict,
+)
 from pydantic_ai import Agent
-from pydantic_ai.models.google import GoogleModel
+from pydantic_ai.models.google import GoogleModel, GoogleModelSettings
 from pydantic_ai.providers.google import GoogleProvider
 
 # --- Configuration ---
-CONTEXT_SIZE_LIMIT = 200000
+CONTEXT_SIZE_LIMIT = (
+    200000  # The maximum size of context to be sent to the LLM in characters.
+)
+
+# A list of harm categories to be disabled in the safety settings for the Google AI model.
+# This allows the model to process and generate code that might otherwise be flagged.
+DISABLED_HARM_CATEGORIES: List[HarmCategory] = [
+    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+    HarmCategory.HARM_CATEGORY_HARASSMENT,
+    HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+    HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY,
+]
 
 
 # --- File Utilities ---
 
+
 def get_git_files(directory: str) -> List[str]:
-    """Gets the list of files tracked by Git."""
+    """
+    Gets the list of all files tracked by Git in the specified directory.
+
+    Args:
+        directory: The path to the git repository.
+
+    Returns:
+        A list of file paths relative to the repository root.
+        Returns an empty list if git is not found or an error occurs.
+    """
     try:
-        logging.info(f"🔍 Searching for git files in: {directory}")
+        logging.info(f"🔍 Searching for git-tracked files in: {directory}")
+        command = ["git", "ls-files"]
         result = subprocess.run(
-            ["git", "ls-files"], cwd=directory, capture_output=True, text=True, check=True
+            command,
+            cwd=directory,
+            capture_output=True,
+            text=True,
+            check=True,
+            encoding="utf-8",
         )
-        files = result.stdout.strip().split("\n")
+
+        stdout = result.stdout.strip()
+        if not stdout:
+            logging.warning("Git command 'ls-files' returned no files.")
+            return []
+
+        files = stdout.split("\n")
         logging.info(f"✅ Found {len(files)} files tracked by git.")
         return files
     except FileNotFoundError:
@@ -32,10 +73,25 @@ def get_git_files(directory: str) -> List[str]:
     except subprocess.CalledProcessError as e:
         logging.error(f"❌ Error executing 'git ls-files': {e.stderr}")
         return []
+    except Exception as e:
+        logging.error(f"An unexpected error occurred in get_git_files: {e}")
+        return []
 
 
 def read_file_content(directory: str, file_path: str) -> Optional[str]:
-    """Safely reads the content of a single file."""
+    """
+    Safely reads the content of a single file.
+
+    Args:
+        directory: The base directory of the project.
+        file_path: The relative path to the file.
+
+    Returns:
+        The content of the file as a string, or None if an error occurs.
+    """
+    if not file_path:
+        logging.warning("read_file_content received an empty file_path.")
+        return None
     full_path = os.path.join(directory, file_path)
     try:
         with open(full_path, "r", encoding="utf-8") as f:
@@ -48,11 +104,18 @@ def read_file_content(directory: str, file_path: str) -> Optional[str]:
         return None
 
 
-def write_file_content(directory: str, file_path: str, content: str):
-    """Writes content to a file, creating directories if necessary."""
+def write_file_content(directory: str, file_path: str, content: str) -> None:
+    """
+    Writes content to a file, creating parent directories if they don't exist.
+
+    Args:
+        directory: The base directory of the project.
+        file_path: The relative path to the file.
+        content: The string content to write to the file.
+    """
     full_path = os.path.join(directory, file_path)
     try:
-        # Ensure the directory exists
+        # Ensure the parent directory exists
         os.makedirs(os.path.dirname(full_path), exist_ok=True)
         with open(full_path, "w", encoding="utf-8") as f:
             f.write(content)
@@ -63,93 +126,150 @@ def write_file_content(directory: str, file_path: str, content: str):
 
 # --- Base AI Agent ---
 
+
 class BaseAiAgent:
-    """A base class for AI agents, handling API key and model configuration."""
+    """
+    A base class for AI agents, handling API key loading, model configuration,
+    and common AI-related tasks like summarization.
+    """
 
     def __init__(self):
-        """Initializes the agent and loads the API key."""
+        """Initializes the agent by loading the Google API key from .env file."""
         load_dotenv()
         self.api_key = os.getenv("GOOGLE_API_KEY")
         if not self.api_key:
-            raise ValueError("GOOGLE_API_KEY is not set. Please create a .env file and add it.")
+            raise ValueError(
+                "GOOGLE_API_KEY is not set. Please create a .env file and add it."
+            )
 
-    def _get_gemini_model(self, model_name: str, temperature: float = 0.2) -> GoogleModel:
-        """Configures and returns a specific Gemini model instance."""
-        if self.api_key is None:
-            raise ValueError("API key is not set. Please set GOOGLE_API_KEY in your environment variables.")
+    def _get_gemini_model(
+        self, model_name: str, temperature: float = 0.2
+    ) -> GoogleModel:
+        """
+        Configures and returns a specific Gemini model instance.
 
+        Args:
+            model_name: The name of the Gemini model to use (e.g., 'gemini-1.5-pro').
+            temperature: The creativity of the model, from 0.0 to 1.0.
+
+        Returns:
+            An instance of the configured GoogleModel.
+        """
+        if not self.api_key:
+            raise ValueError(
+                "GOOGLE_API_KEY is not set. Please create a .env file and add it."
+            )
         return GoogleModel(
             model_name,
-            provider=GoogleProvider(
-                api_key=self.api_key,
-            ),
-            settings={
-                "temperature": temperature,
-            },
+            provider=GoogleProvider(api_key=self.api_key),
+            settings={"temperature": temperature},
         )
 
     def get_safety_settings(self) -> List[SafetySettingDict]:
-        """Returns safety settings to block no harm categories."""
-        harm_categories: List[HarmCategory] = [
-            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-            HarmCategory.HARM_CATEGORY_HARASSMENT,
-            HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-            HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY,
-        ]
+        """
+        Returns safety settings to disable blocking for specific harm categories.
+        This is often necessary for code generation tasks where code might be
+        misinterpreted as harmful content.
+
+        Returns:
+            A list of safety setting dictionaries for the Google API.
+        """
         return [
             SafetySettingDict(category=cat, threshold=HarmBlockThreshold.BLOCK_NONE)
-            for cat in harm_categories
+            for cat in DISABLED_HARM_CATEGORIES
         ]
 
     def summarize_code(self, file_path: str, code_content: str) -> str:
-        """Summarizes a single file's code content."""
+        """
+        Summarizes a single file's code content using an AI model.
+
+        Args:
+            file_path: The path of the file being summarized (for context).
+            code_content: The actual code content to summarize.
+
+        Returns:
+            A string containing the AI-generated summary.
+        """
         system_prompt = """
-You are an expert code analyst. Your task is to summarize the provided code. 
-Focus on the file's primary purpose, its key functions, classes, and their responsibilities. 
+You are an expert code analyst. Your task is to summarize the provided code.
+Focus on the file's primary purpose, its key functions, classes, and their responsibilities.
 Mention any important logic or side effects. The summary should be concise and informative.
 """
-        prompt = f"Please summarize the following code from the file `{file_path}`: {code_content}"
+        prompt = f"Please summarize the following code from the file `{file_path}`:\n\n{code_content}"
+
+        # Note: A new agent is instantiated for each summarization call.
+        # This is acceptable for now as it keeps the summarization logic self-contained,
+        # but could be optimized if summarization becomes a high-frequency operation.
         summarizer_agent = Agent(
-            self._get_gemini_model("gemini-2.5-flash"),
+            self._get_gemini_model("gemini-1.5-flash"),
             output_type=str,
             system_prompt=system_prompt,
         )
         logging.info(f"📝 Summarizing code in {file_path}...")
-        summary = summarizer_agent.run_sync(prompt)
+        summary = summarizer_agent.run_sync(
+            prompt,
+            model_settings=GoogleModelSettings(
+                google_safety_settings=self.get_safety_settings()
+            ),
+        )
         return summary.output
 
 
 # --- Context Management ---
+
 
 def build_context_from_dict(
     context_data: Dict[str, str],
     summarizer: Callable[[str, str], str],
     exclude_file: Optional[str] = None,
 ) -> str:
-    """Builds a context string from a dictionary of file contents, summarizing if too large."""
+    """
+    Builds a context string from a dictionary of file contents.
 
-    files_to_process = {k: v for k, v in context_data.items() if k != exclude_file}
+    If the total size of the content exceeds a defined limit, it uses the
+    provided summarizer function to shorten the content of each file. Otherwise,
+    it includes the full file content.
+
+    Args:
+        context_data: A dictionary mapping file paths to their content.
+        summarizer: A callable function that takes a file path and content
+                    and returns a summary string.
+        exclude_file: An optional file path to exclude from the context.
+
+    Returns:
+        A single string formatted for use as context in an LLM prompt.
+    """
+    files_to_process = {
+        path: content
+        for path, content in context_data.items()
+        if path != exclude_file and content
+    }
+    if not files_to_process:
+        return "No context files provided."
 
     total_size = sum(len(content) for content in files_to_process.values())
 
-    context_source = (
+    context_source_info = (
         f"(from {len(files_to_process)} files, excluding {exclude_file})"
         if exclude_file
         else f"(from {len(files_to_process)} files)"
     )
 
+    context_parts: List[str] = []
     if total_size > CONTEXT_SIZE_LIMIT:
         logging.warning(
-            f"Context size {context_source} is {total_size} chars, exceeding limit of {CONTEXT_SIZE_LIMIT}. Summarizing..."
+            f"Context size {context_source_info} is {total_size} chars, "
+            f"exceeding limit of {CONTEXT_SIZE_LIMIT}. Summarizing..."
         )
-        context_parts: List[str] = []
         for file_path, content in files_to_process.items():
             summary = summarizer(file_path, content)
             context_parts.append(f"--- Summary of {file_path} ---\n{summary}\n")
-        return "\n".join(context_parts)
     else:
-        logging.info(f"Context size {context_source} is {total_size} chars. Using full file contents.")
-        context_parts = []
+        logging.info(
+            f"Context size {context_source_info} is {total_size} chars. "
+            "Using full file contents."
+        )
         for file_path, content in files_to_process.items():
             context_parts.append(f"--- Content of {file_path} ---\n{content}\n")
-        return "\n".join(context_parts)
+
+    return "\n".join(context_parts)

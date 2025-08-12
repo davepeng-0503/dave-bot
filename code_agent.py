@@ -24,7 +24,9 @@ MAX_REANALYSIS_RETRIES = 3
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
+
 # --- Pydantic Models for Code Analysis & Generation ---
+
 class NewFile(BaseModel):
     """Represents a new file that needs to be created for the task."""
     file_path: str = Field(description="The full path for the new file to be created.")
@@ -81,13 +83,13 @@ class GeneratedCode(BaseModel):
 
 
 # --- Core Logic for AI Interaction ---
+
 class AiCodeAgent(BaseAiAgent):
     """Handles all interactions with the Gemini AI model."""
 
     def get_initial_analysis(self, task: str, file_list: List[str], directory: str, app_description: str = "", feedback: Optional[str] = None) -> CodeAnalysis:
         """Runs the agent to get the code analysis, potentially using feedback or a search tool."""
         
-        # Tool definition within the method's scope to capture the 'directory' argument
         def git_grep_search_tool(query: str) -> str:
             """
             Performs a case-insensitive 'git grep' search in the codebase to find relevant files.
@@ -100,7 +102,7 @@ class AiCodeAgent(BaseAiAgent):
                     cwd=directory,
                     capture_output=True,
                     text=True,
-                    check=False # Don't raise error if grep returns 1 (no matches)
+                    check=False
                 )
                 if result.returncode == 0:
                     return f"Git grep results for '{query}':\n{result.stdout}"
@@ -144,7 +146,7 @@ Explain your reasoning for this order in the `reasoning` field.
 ---
 IMPORTANT: This is a re-analysis. A previous attempt failed due to insufficient context.
 The programmer's feedback was: "{feedback}"
-Please adjust your file selection. You might need to use the `git_grep_search_tool` or add more files to `relevant_files`.
+Please adjust your file selection and plan. You might need to use the `git_grep_search_tool` or add more files to `relevant_files` to satisfy the context request.
 ---
 """
 
@@ -165,12 +167,9 @@ Please provide your analysis. Use the `git_grep_search_tool` if you need to find
         log_message = "🤖 Conducting initial codebase analysis..." if not feedback else f"🔁 Re-analyzing codebase with feedback: {feedback}"
         logging.info(log_message)
         
-        google_safety_settings = self.get_safety_settings()
         analysis = analysis_agent.run_sync(
             prompt,
-            model_settings=GoogleModelSettings(
-            google_safety_settings=google_safety_settings
-            ),
+            model_settings=GoogleModelSettings(google_safety_settings=self.get_safety_settings()),
         )
         return analysis.output
 
@@ -215,35 +214,38 @@ Original content of `{file_path}`:
 """
         prompt += "\nPlease generate the complete, new source code for this file. If you lack context for this file or foresee needing context for future files, please request it."
 
-        # Use a more powerful model for code generation
-        generation_agent = Agent(self._get_gemini_model('gemini-2.5-pro'), output_type=GeneratedCode, system_prompt=system_prompt)
+        generation_agent = Agent(
+            self._get_gemini_model('gemini-2.5-pro'), 
+            output_type=GeneratedCode, 
+            system_prompt=system_prompt
+        )
         
         logging.info(f"💡 Generating new code for {file_path}...")
-        google_safety_settings = self.get_safety_settings()
         generated_code = generation_agent.run_sync(
             prompt,
-            model_settings=GoogleModelSettings(
-            google_safety_settings=google_safety_settings
-            ),
+            model_settings=GoogleModelSettings(google_safety_settings=self.get_safety_settings()),
         )
         return generated_code.output
 
 
 # --- CLI and File Operations ---
+
 class CliManager:
     """Manages CLI interactions, file I/O, and orchestrates the analysis and code generation."""
 
     def __init__(self):
+        """Initializes the CLI manager and the AI code agent."""
         self.ai_agent = AiCodeAgent()
-    
-    def run(self):
-        """The main entry point for the CLI tool."""
-        task = ""
+        self.args = self._parse_args()
 
+    def _parse_args(self) -> argparse.Namespace:
+        """Parses command-line arguments."""
         parser = argparse.ArgumentParser(
             description="A tool to analyze a git repository and apply AI-generated code changes for a specific task."
         )
-        parser.add_argument("--task", type=str, default=task, help="The task description for the AI.")
+        parser.add_argument(
+            "--task", type=str, required=True, help="The task description for the AI."
+        )
         parser.add_argument(
             "--dir", type=str, default=os.getcwd(), help="The directory of the git repository."
         )
@@ -256,45 +258,141 @@ class CliManager:
             help="Bypass confirmation before overwriting files."
         )
         parser.add_argument(
-            "--strict", type=bool, default=True,
-            help="Whether the AI should be liberal with making changes or restrict changes to only those needed for the task"
+            '--strict', dest='strict', action='store_true', help="Restrict AI to task-focused changes."
         )
-        args = parser.parse_args()
+        parser.add_argument(
+            '--no-strict', dest='strict', action='store_false', help="Allow AI to make broader improvements."
+        )
+        parser.set_defaults(strict=True)
+        return parser.parse_args()
 
-        # --- 1. Initial Setup ---
-        app_desc_content = read_file_content(args.dir, args.app_description) or ""
-        git_files = get_git_files(args.dir)
-        if not git_files:
-            logging.warning("No files tracked by git were found.")
-
-        # Get untracked files as well to give the AI full context
+    def _get_all_repository_files(self) -> List[str]:
+        """Gets all tracked and untracked files in the repository."""
+        git_files = get_git_files(self.args.dir)
         try:
             untracked_result = subprocess.run(
                 ["git", "ls-files", "--others", "--exclude-standard"],
-                cwd=args.dir,
-                capture_output=True,
-                text=True,
-                check=False,
+                cwd=self.args.dir, capture_output=True, text=True, check=False,
             )
             if untracked_result.returncode == 0 and untracked_result.stdout:
                 untracked_files = untracked_result.stdout.strip().split("\n")
                 logging.info(f"Found {len(untracked_files)} untracked files.")
-                all_repo_files = sorted(list(set(git_files + untracked_files)))
-            else:
-                all_repo_files = git_files
+                return sorted(list(set(git_files + untracked_files)))
+            return git_files
         except Exception as e:
-            logging.warning(f"Could not get untracked git files: {e}")
-            all_repo_files = git_files
+            logging.warning(f"Could not get untracked git files: {e}. Proceeding with tracked files only.")
+            return git_files
 
+    def _validate_analysis(self, analysis: CodeAnalysis) -> bool:
+        """Validates the AI's plan for consistency."""
+        planned_files: Set[str] = set(analysis.files_to_edit) | {f.file_path for f in analysis.files_to_create}
+        ordered_files: Set[str] = set(analysis.generation_order)
+
+        if planned_files != ordered_files:
+            logging.error("Analysis Error: Mismatch between files to change and the generation order.")
+            missing_from_order = planned_files - ordered_files
+            extra_in_order = ordered_files - planned_files
+            if missing_from_order:
+                logging.error(f"  - Planned but not in order: {missing_from_order}")
+            if extra_in_order:
+                logging.error(f"  - In order but not planned: {extra_in_order}")
+            return False
+        return True
+
+    def _execute_generation_loop(self, analysis: CodeAnalysis, all_repo_files: List[str], app_desc_content: str) -> List[str]:
+        """
+        Manages the iterative process of generating code, handling context, and re-analyzing on failure.
+        Returns a list of files that were not successfully processed.
+        """
+        files_to_process = analysis.generation_order
+        context_data: Dict[str, str] = {}
+        feedback_for_reanalysis = ""
+        retries = 0
+
+        while files_to_process and retries <= MAX_REANALYSIS_RETRIES:
+            if feedback_for_reanalysis:
+                logging.info("--- Re-running Analysis with Feedback ---")
+                analysis = self.ai_agent.get_initial_analysis(
+                    self.args.task, all_repo_files, self.args.dir, app_desc_content, feedback=feedback_for_reanalysis
+                )
+                files_to_process = analysis.generation_order
+                feedback_for_reanalysis = ""  # Reset feedback
+
+            # Pre-load context for the current batch of files
+            files_for_context = list(set(analysis.relevant_files + analysis.files_to_edit))
+            for fp in files_for_context:
+                if fp not in context_data:  # Only load if not already in memory
+                    content = read_file_content(self.args.dir, fp)
+                    if content is not None:
+                        context_data[fp] = content
+            
+            processed_in_loop: List[str] = []
+            reanalysis_needed = False
+
+            for file_path in files_to_process:
+                remaining_order = [f for f in files_to_process if f not in processed_in_loop]
+                context_str = build_context_from_dict(context_data, self.ai_agent.summarize_code, exclude_file=file_path)
+                
+                generated_code = self.ai_agent.generate_file_content(
+                    self.args.task, context_str, file_path, all_repo_files,
+                    remaining_order, context_data.get(file_path), strict=self.args.strict
+                )
+
+                if generated_code.requires_more_context:
+                    logging.warning(f"Generator needs more context for {file_path}: {generated_code.context_request}")
+                    feedback_for_reanalysis = generated_code.context_request
+                    retries += 1
+                    reanalysis_needed = True
+                    break  # Break inner loop to re-run analysis
+
+                # Success case
+                write_file_content(self.args.dir, file_path, generated_code.code)
+                context_data[file_path] = generated_code.code  # Update context for next file in this loop
+                processed_in_loop.append(file_path)
+
+                # Dynamically load more context if requested for future files
+                if generated_code.needed_context_for_future_files:
+                    logging.info(f"Agent requested more context for future steps: {generated_code.needed_context_for_future_files}")
+                    for new_context_file in generated_code.needed_context_for_future_files:
+                        if new_context_file not in context_data:
+                            content = read_file_content(self.args.dir, new_context_file)
+                            if content:
+                                context_data[new_context_file] = content
+
+            # Update the list of files to process for the next iteration
+            files_to_process = [f for f in files_to_process if f not in processed_in_loop]
+
+            if not reanalysis_needed:
+                break  # Exit while loop if all files processed successfully
+
+        return files_to_process
+
+    def _report_final_status(self, unprocessed_files: List[str]):
+        """Prints the final status of the code generation task."""
+        if unprocessed_files:
+            logging.error(f"❌ Failed to complete the task after {MAX_REANALYSIS_RETRIES} retries.")
+            logging.error("The following files were not processed:")
+            for file_path in unprocessed_files:
+                logging.error(f"  - {file_path}")
+        else:
+            logging.info("✅ All changes have been successfully applied.")
+
+    def run(self):
+        """The main entry point for the CLI tool."""
+        # 1. Initial Setup
+        app_desc_content = read_file_content(self.args.dir, self.args.app_description) or ""
+        all_repo_files = self._get_all_repository_files()
         if not all_repo_files:
-            logging.error("No tracked or untracked files found in the repository. Exiting.")
+            logging.error("No tracked or untracked files found. Exiting.")
             return
 
-        # --- 2. Initial Analysis ---
-        analysis = self.ai_agent.get_initial_analysis(args.task, all_repo_files, args.dir, app_desc_content)
+        # 2. Initial Analysis
+        analysis = self.ai_agent.get_initial_analysis(
+            self.args.task, all_repo_files, self.args.dir, app_desc_content
+        )
         
-        print("\n--- AI Code Analysis Result ---")
-        print(f"Task: {args.task}\n")
+        print("\n--- 🤖 AI Code Analysis Result ---")
+        print(f"Task: {self.args.task}\n")
         print(f"Overall Reasoning:\n {analysis.reasoning}\n")
         print("Relevant Files for Context:", analysis.relevant_files or "None")
         print("Files to Edit:", analysis.files_to_edit or "None")
@@ -302,119 +400,26 @@ class CliManager:
         print("Proposed Generation Order:", analysis.generation_order or "None")
         print("---------------------------------\n")
 
-        # Validate the plan for consistency
-        planned_files: Set[str] = set(analysis.files_to_edit) | {f.file_path for f in analysis.files_to_create}
-        ordered_files: Set[str] = set(analysis.generation_order)
-
-        if planned_files != ordered_files:
-            logging.error("Analysis Error: Mismatch between files to change and the generation order.")
-            if planned_files - ordered_files:
-                logging.error(f"Planned but not in order: {planned_files - ordered_files}")
-            if ordered_files - planned_files:
-                logging.error(f"In order but not planned: {ordered_files - planned_files}")
+        if not self._validate_analysis(analysis):
             return
-            
-        all_files_to_process = analysis.generation_order # Use the AI-provided intelligent order
-        if not all_files_to_process:
-            logging.info("No files to edit or create based on initial analysis. Exiting.")
+        
+        if not analysis.generation_order:
+            logging.info("AI analysis resulted in no files to change. Exiting.")
             return
 
-        # --- 3. User Confirmation ---
-        if not args.force:
+        # 3. User Confirmation
+        if not self.args.force:
             proceed = input("Proceed with generating and writing file changes? (y/n): ").lower()
             if proceed != 'y':
                 logging.info("Operation cancelled by user.")
                 return
 
-        # --- 4. Iterative Generation and Re-analysis Loop ---
-        retries = 0
-        feedback_for_next_loop = ""
+        # 4. Iterative Generation
+        unprocessed_files = self._execute_generation_loop(analysis, all_repo_files, app_desc_content)
 
-        while all_files_to_process and retries < MAX_REANALYSIS_RETRIES:
-            if feedback_for_next_loop:
-                # Re-analyze with feedback
-                analysis = self.ai_agent.get_initial_analysis(
-                    args.task, all_repo_files, args.dir, app_desc_content, feedback=feedback_for_next_loop
-                )
-                # We update the full list of files to process based on the new analysis
-                all_files_to_process = analysis.generation_order
-                feedback_for_next_loop = "" # Reset feedback
+        # 5. Final Status
+        self._report_final_status(unprocessed_files)
 
-            # Pre-load all necessary context into an in-memory dictionary.
-            files_for_context = list(set(analysis.relevant_files + analysis.files_to_edit))
-            context_data: Dict[str, str] = {}
-            logging.info("Pre-loading context from disk for dynamic updates...")
-            for fp in files_for_context:
-                content = read_file_content(args.dir, fp)
-                if content is not None:
-                    context_data[fp] = content
-            
-            processed_in_this_loop: List[str] = []
-            reanalysis_needed = False
-
-            for file_path in all_files_to_process:
-                full_context = build_context_from_dict(
-                    context_data, self.ai_agent.summarize_code, exclude_file=file_path
-                )
-                
-                original_content = context_data.get(file_path)
-                
-                # The current list of files to process is the remaining generation order
-                remaining_generation_order = [f for f in all_files_to_process if f not in processed_in_this_loop]
-
-                generated_code = self.ai_agent.generate_file_content(
-                    args.task,
-                    full_context,
-                    file_path,
-                    all_repo_files,
-                    remaining_generation_order,
-                    original_content,
-                    strict=args.strict
-                )
-
-                if generated_code.requires_more_context:
-                    logging.warning(f"Generator needs more context for file {file_path}.")
-                    logging.info(f"Reason: {generated_code.context_request}")
-                    feedback_for_next_loop = generated_code.context_request
-                    retries += 1
-                    reanalysis_needed = True
-                    break # Exit the for loop to start the while loop again with re-analysis
-                else:
-                    write_file_content(args.dir, file_path, generated_code.code)
-                    # Update context with the newly generated code for subsequent steps in this loop
-                    context_data[file_path] = generated_code.code
-                    processed_in_this_loop.append(file_path)
-
-                    # Handle request for more context for FUTURE files
-                    if generated_code.needed_context_for_future_files:
-                        logging.info(
-                            f"Agent requested additional context for future steps: {generated_code.needed_context_for_future_files}"
-                        )
-                        for new_context_file in generated_code.needed_context_for_future_files:
-                            if new_context_file not in context_data:
-                                content = read_file_content(args.dir, new_context_file)
-                                if content is not None:
-                                    logging.info(f"Loading '{new_context_file}' into context.")
-                                    context_data[new_context_file] = content
-                                else:
-                                    logging.warning(
-                                        f"AI requested context for a non-existent file: {new_context_file}. Ignoring."
-                                    )
-
-            # Update the list of files that still need processing
-            all_files_to_process = [f for f in all_files_to_process if f not in processed_in_this_loop]
-
-            if not reanalysis_needed:
-                # If we completed a full loop without needing re-analysis, we are done
-                break
-        
-        # --- 5. Final Status ---
-        if all_files_to_process:
-            logging.error(f"❌ Failed to complete the task after {MAX_REANALYSIS_RETRIES} retries. The following files were not processed:")
-            for file_path in all_files_to_process:
-                logging.error(f"   - {file_path}")
-        else:
-            logging.info("✅ All changes have been successfully applied.")
 
 if __name__ == "__main__":
     cli = CliManager()

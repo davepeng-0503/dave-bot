@@ -4,7 +4,7 @@ import json
 import logging
 import os
 import subprocess
-from typing import Dict, List, Literal, Optional
+from typing import Dict, List, Literal
 
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
@@ -16,9 +16,6 @@ from shared_agents_utils import (
     get_git_files,
     read_file_content,
 )
-
-# Configure logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 # --- Pydantic Models for Code Review ---
 
@@ -166,83 +163,65 @@ Please provide your complete and thorough review for this file in the specified 
 
 # --- CLI and Orchestration ---
 
-class CliManager:
+class ReviewOrchestrator:
     """Manages CLI interactions and orchestrates the code review process."""
 
-    def __init__(self):
+    def __init__(self, args: argparse.Namespace):
         self.ai_agent = AiCodeReviewAgent()
+        self.args = args
+        self.directory = args.dir
 
-    def _get_changed_files(self, directory: str, compare_branch: Optional[str] = None) -> List[str]:
-        """
-        Gets a list of changed files.
-        If compare_branch is provided, it gets the diff between the branch and the current working tree.
-        Otherwise, it gets all local changes: staged, unstaged, and untracked files.
-        """
+    def _run_git_command(self, command: List[str]) -> List[str]:
+        """Runs a git command and returns its output split by lines."""
         try:
-            if compare_branch:
-                logging.info(f"Comparing current changes against branch '{compare_branch}'...")
-                # This will include committed changes in the current branch and uncommitted local changes.
-                result = subprocess.run(
-                    ["git", "diff", "--name-only", compare_branch],
-                    cwd=directory, capture_output=True, text=True, check=True
-                )
-                diff_files = result.stdout.strip().split("\n") if result.stdout.strip() else []
-
-                # Also get untracked files, as they are part of the "local changes"
-                untracked_result = subprocess.run(
-                    ["git", "ls-files", "--others", "--exclude-standard"],
-                    cwd=directory, capture_output=True, text=True, check=True
-                )
-                untracked_files = untracked_result.stdout.strip().split("\n") if untracked_result.stdout.strip() else []
-
-                changed_files = sorted(list(set(diff_files + untracked_files)))
-
-                if not changed_files:
-                    return []
-                logging.info(f"✅ Found {len(changed_files)} changed files compared to '{compare_branch}'.")
-                return changed_files
-
-            # Original logic for local changes
-            logging.info("Checking for local changes (staged, unstaged, untracked)...")
-
-            # Staged changes (files added to the index but not yet committed)
-            staged_result = subprocess.run(
-                ["git", "diff", "--name-only", "--cached"],
-                cwd=directory, capture_output=True, text=True, check=True
+            result = subprocess.run(
+                command,
+                cwd=self.directory,
+                capture_output=True,
+                text=True,
+                check=True
             )
-            staged_files = staged_result.stdout.strip().split("\n") if staged_result.stdout.strip() else []
-
-            # Unstaged changes (files modified in the working directory but not staged)
-            unstaged_result = subprocess.run(
-                ["git", "diff", "--name-only"],
-                cwd=directory, capture_output=True, text=True, check=True
-            )
-            unstaged_files = unstaged_result.stdout.strip().split("\n") if unstaged_result.stdout.strip() else []
-
-            # Untracked files (new files not yet staged)
-            untracked_result = subprocess.run(
-                ["git", "ls-files", "--others", "--exclude-standard"],
-                cwd=directory, capture_output=True, text=True, check=True
-            )
-            untracked_files = untracked_result.stdout.strip().split("\n") if untracked_result.stdout.strip() else []
-
-            # Combine and get unique file paths
-            all_changed_files = sorted(list(set(staged_files + unstaged_files + untracked_files)))
-
-            if not all_changed_files:
-                return []
-
-            logging.info(f"✅ Found {len(all_changed_files)} locally changed files to review.")
-            return all_changed_files
+            return result.stdout.strip().split("\n") if result.stdout.strip() else []
         except FileNotFoundError:
             logging.error("❌ 'git' command not found. Is Git installed?")
-            return []
+            raise
         except subprocess.CalledProcessError as e:
-            logging.error(f"❌ Error getting changed files: {e.stderr}")
-            logging.error("Please ensure you are in a valid git repository and the compare branch is correct.")
+            logging.error(f"❌ Error running git command '{' '.join(command)}': {e.stderr}")
+            raise
+
+    def _get_local_changed_files(self) -> List[str]:
+        """Gets all local changes: staged, unstaged, and untracked files."""
+        logging.info("Checking for local changes (staged, unstaged, untracked)...")
+        staged_files = self._run_git_command(["git", "diff", "--name-only", "--cached"])
+        unstaged_files = self._run_git_command(["git", "diff", "--name-only"])
+        untracked_files = self._run_git_command(["git", "ls-files", "--others", "--exclude-standard"])
+        return sorted(list(set(staged_files + unstaged_files + untracked_files)))
+
+    def _get_branch_diff_files(self, compare_branch: str) -> List[str]:
+        """Gets the diff between a branch and the current working tree."""
+        logging.info(f"Comparing current changes against branch '{compare_branch}'...")
+        diff_files = self._run_git_command(["git", "diff", "--name-only", compare_branch])
+        untracked_files = self._run_git_command(["git", "ls-files", "--others", "--exclude-standard"])
+        return sorted(list(set(diff_files + untracked_files)))
+
+    def _get_changed_files(self) -> List[str]:
+        """Gets a list of changed files based on the selected mode."""
+        try:
+            if self.args.compare:
+                changed_files = self._get_branch_diff_files(self.args.compare)
+            else:
+                changed_files = self._get_local_changed_files()
+
+            if not changed_files:
+                return []
+
+            logging.info(f"✅ Found {len(changed_files)} changed files to review.")
+            return changed_files
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            logging.error("Could not retrieve changed files due to a git error. Exiting.")
             return []
 
-    def _print_review(self, reviews: List[FileReview]):
+    def _print_review_summary(self, reviews: List[FileReview]):
         """Prints the formatted review results."""
         print("\n\n--- 📝 AI Code Review Summary ---")
         total_comments = 0
@@ -264,7 +243,6 @@ class CliManager:
                 continue
             
             total_comments += len(review.comments)
-            # Sort comments by line number
             sorted_comments = sorted(review.comments, key=lambda c: c.line_number)
 
             for comment in sorted_comments:
@@ -274,79 +252,22 @@ class CliManager:
         print(f"✨ Review complete. Found {total_comments} total comments across {len(reviews)} files.")
         print("="*80)
 
-    def run(self):
-        """The main entry point for the CLI tool."""
-        parser = argparse.ArgumentParser(
-            description="An AI agent that reviews code changes in a git repository. It can review local uncommitted changes or all changes against a specified branch."
-        )
-        parser.add_argument(
-            "--task", type=str, required=True,
-            help="The task description or goal of the changes for the AI to review against."
-        )
-        parser.add_argument(
-            "--dir", type=str, default=os.getcwd(),
-            help="The directory of the git repository."
-        )
-        parser.add_argument(
-            "--app-description", type=str, default="app_description.txt",
-            help="Path to a text file describing the app's purpose for better context."
-        )
-        parser.add_argument(
-            "--compare", type=str, default=None,
-            help="The git branch to compare against (e.g., 'origin/main'). If provided, reviews committed and local changes against this branch."
-        )
-        parser.add_argument(
-            '--strict',
-            dest='strict',
-            action='store_true',
-            help="Restrict comments to only those related to the task (default)."
-        )
-        parser.add_argument(
-            '--no-strict',
-            dest='strict',
-            action='store_false',
-            help="Allow more liberal feedback on code style, refactors, etc."
-        )
-        parser.set_defaults(strict=True)
-        args = parser.parse_args()
-
-        # --- 1. Initial Setup ---
-        app_desc_content = read_file_content(args.dir, args.app_description) or ""
-        all_git_files = get_git_files(args.dir)
-        if not all_git_files:
-            return
-        
-        changed_files = self._get_changed_files(args.dir, args.compare)
-        if not changed_files:
-            if args.compare:
-                logging.info(f"No changes detected compared to '{args.compare}'. Exiting.")
-            else:
-                logging.info("No local changes detected. Exiting.")
-            return
-
-        # --- 2. Initial Analysis ---
-        analysis = self.ai_agent.get_review_analysis(
-            args.task, all_git_files, changed_files, app_desc_content
-        )
-        
+    def _print_analysis_plan(self, analysis: ReviewAnalysis):
+        """Prints the AI's plan for the review."""
         print("\n--- 🤖 AI Review Plan ---")
-        print(f"Task: {args.task}\n")
+        print(f"Task: {self.args.task}\n")
         print(f"Reasoning:\n {analysis.reasoning}\n")
         print("Files to Review:", analysis.files_to_review or "None")
         print("Files for Context:", analysis.relevant_context_files or "None")
         print("--------------------------\n")
 
-        proceed = input("Proceed with AI code review? (y/n): ").lower()
-        if proceed != 'y':
-            logging.info("Operation cancelled by user.")
-            return
-
-        # --- 3. Load Context and Review Files ---
+    def _execute_reviews(self, analysis: ReviewAnalysis) -> List[FileReview]:
+        """Loads context and iterates through files to perform reviews."""
         files_for_context = list(set(analysis.relevant_context_files + analysis.files_to_review))
         context_data: Dict[str, str] = {}
-        logging.info("Pre-loading all file contents for review...")
+        logging.info("Pre-loading all file contents for review context...")
         for fp in files_for_context:
-            content = read_file_content(args.dir, fp)
+            content = read_file_content(self.directory, fp)
             if content is not None:
                 context_data[fp] = content
             else:
@@ -358,7 +279,6 @@ class CliManager:
                 logging.error(f"Cannot review {file_to_review} as its content could not be read.")
                 continue
 
-            # Build context string, excluding the file currently under review
             full_context = build_context_from_dict(
                 context_data, self.ai_agent.summarize_code, exclude_file=file_to_review
             )
@@ -366,14 +286,88 @@ class CliManager:
             file_content = context_data[file_to_review]
             
             review_result = self.ai_agent.review_file_content(
-                args.task, full_context, file_to_review, file_content, strict=args.strict
+                self.args.task, full_context, file_to_review, file_content, strict=self.args.strict
             )
             all_reviews.append(review_result)
+        return all_reviews
 
-        # --- 4. Print Final Report ---
-        self._print_review(all_reviews)
+    def run(self):
+        """The main entry point for orchestrating the code review."""
+        # 1. Initial Setup
+        app_desc_content = read_file_content(self.directory, self.args.app_description) or ""
+        all_git_files = get_git_files(self.directory)
+        if not all_git_files:
+            return
+        
+        changed_files = self._get_changed_files()
+        if not changed_files:
+            if self.args.compare:
+                logging.info(f"No changes detected compared to '{self.args.compare}'. Exiting.")
+            else:
+                logging.info("No local changes detected. Exiting.")
+            return
 
+        # 2. Initial Analysis
+        analysis = self.ai_agent.get_review_analysis(
+            self.args.task, all_git_files, changed_files, app_desc_content
+        )
+        
+        self._print_analysis_plan(analysis)
+
+        if not self.args.force:
+            proceed = input("Proceed with AI code review? (y/n): ").lower()
+            if proceed != 'y':
+                logging.info("Operation cancelled by user.")
+                return
+
+        # 3. Execute Reviews
+        all_reviews = self._execute_reviews(analysis)
+
+        # 4. Print Final Report
+        self._print_review_summary(all_reviews)
+
+def parse_arguments() -> argparse.Namespace:
+    """Parses command-line arguments for the code review agent."""
+    parser = argparse.ArgumentParser(
+        description="An AI agent that reviews code changes in a git repository. It can review local uncommitted changes or all changes against a specified branch."
+    )
+    parser.add_argument(
+        "--task", type=str, required=True,
+        help="The task description or goal of the changes for the AI to review against."
+    )
+    parser.add_argument(
+        "--dir", type=str, default=os.getcwd(),
+        help="The directory of the git repository."
+    )
+    parser.add_argument(
+        "--app-description", type=str, default="app_description.txt",
+        help="Path to a text file describing the app's purpose for better context."
+    )
+    parser.add_argument(
+        "--compare", type=str, default=None,
+        help="The git branch to compare against (e.g., 'origin/main'). If provided, reviews committed and local changes against this branch."
+    )
+    parser.add_argument(
+        "--force", action="store_true",
+        help="Bypass confirmation before starting the review."
+    )
+    parser.add_argument(
+        '--strict', dest='strict', action='store_true',
+        help="Restrict comments to only those related to the task (default)."
+    )
+    parser.add_argument(
+        '--no-strict', dest='strict', action='store_false',
+        help="Allow more liberal feedback on code style, refactors, etc."
+    )
+    parser.set_defaults(strict=True)
+    return parser.parse_args()
+
+def main():
+    """Main entry point of the script."""
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+    args = parse_arguments()
+    orchestrator = ReviewOrchestrator(args)
+    orchestrator.run()
 
 if __name__ == "__main__":
-    cli = CliManager()
-    cli.run()
+    main()
