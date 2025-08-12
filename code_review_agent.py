@@ -105,10 +105,20 @@ Please provide your analysis of which files to review and which to use for conte
         return analysis.output
 
     def review_file_content(
-        self, task: str, context: str, file_path: str, file_content: str
+        self, task: str, context: str, file_path: str, file_content: str, strict: bool = True
     ) -> FileReview:
         """Performs a code review on a single file."""
-        system_prompt = """
+        strict_guideline = (
+            "**Task-Focus**: Your review comments MUST be strictly related to the given task description. "
+            "Do not comment on code style, potential refactors, or issues that are not directly relevant to the task "
+            "unless they introduce a critical bug or security vulnerability."
+        )
+        liberal_guideline = (
+            "**Broad Feedback**: You are encouraged to comment on any aspect of the code that could be improved, "
+            "including code style, clarity, performance, and best practices, even if not directly related to the task."
+        )
+
+        system_prompt = f"""
 You are an expert code reviewer, known for your thorough and constructive feedback. Your task is to review the provided code file based on the overall task description and the context of related files.
 
 **CRITICAL REVIEW GUIDELINES**:
@@ -116,7 +126,8 @@ You are an expert code reviewer, known for your thorough and constructive feedba
 2.  **Be Constructive**: For each issue, explain *why* it's a problem and suggest a clear, actionable improvement.
 3.  **Be Specific**: Tie comments to specific line numbers using the `ReviewComment` model. For general feedback, use the `general_feedback` field.
 4.  **Check Consistency**: Ensure the code is consistent with the overall task and the provided context from other files.
-5.  **Use the Schema**: Structure your entire output as a single `FileReview` JSON object.
+5.  {strict_guideline if strict else liberal_guideline}
+6.  **Use the Schema**: Structure your entire output as a single `FileReview` JSON object.
 
 If you cannot perform a thorough review because you lack critical context (e.g., a referenced file is not provided), you MUST:
 a. Set the `requires_more_context` flag to `true`.
@@ -161,9 +172,37 @@ class CliManager:
     def __init__(self):
         self.ai_agent = AiCodeReviewAgent()
 
-    def _get_changed_files(self, directory: str) -> List[str]:
-        """Gets all local changes: staged, unstaged, and untracked files."""
+    def _get_changed_files(self, directory: str, compare_branch: Optional[str] = None) -> List[str]:
+        """
+        Gets a list of changed files.
+        If compare_branch is provided, it gets the diff between the branch and the current working tree.
+        Otherwise, it gets all local changes: staged, unstaged, and untracked files.
+        """
         try:
+            if compare_branch:
+                logging.info(f"Comparing current changes against branch '{compare_branch}'...")
+                # This will include committed changes in the current branch and uncommitted local changes.
+                result = subprocess.run(
+                    ["git", "diff", "--name-only", compare_branch],
+                    cwd=directory, capture_output=True, text=True, check=True
+                )
+                diff_files = result.stdout.strip().split("\n") if result.stdout.strip() else []
+
+                # Also get untracked files, as they are part of the "local changes"
+                untracked_result = subprocess.run(
+                    ["git", "ls-files", "--others", "--exclude-standard"],
+                    cwd=directory, capture_output=True, text=True, check=True
+                )
+                untracked_files = untracked_result.stdout.strip().split("\n") if untracked_result.stdout.strip() else []
+
+                changed_files = sorted(list(set(diff_files + untracked_files)))
+
+                if not changed_files:
+                    return []
+                logging.info(f"✅ Found {len(changed_files)} changed files compared to '{compare_branch}'.")
+                return changed_files
+
+            # Original logic for local changes
             logging.info("Checking for local changes (staged, unstaged, untracked)...")
 
             # Staged changes (files added to the index but not yet committed)
@@ -199,8 +238,8 @@ class CliManager:
             logging.error("❌ 'git' command not found. Is Git installed?")
             return []
         except subprocess.CalledProcessError as e:
-            logging.error(f"❌ Error getting local changes: {e.stderr}")
-            logging.error("Please ensure you are in a valid git repository.")
+            logging.error(f"❌ Error getting changed files: {e.stderr}")
+            logging.error("Please ensure you are in a valid git repository and the compare branch is correct.")
             return []
 
     def _print_review(self, reviews: List[FileReview]):
@@ -238,7 +277,7 @@ class CliManager:
     def run(self):
         """The main entry point for the CLI tool."""
         parser = argparse.ArgumentParser(
-            description="An AI agent that reviews local, uncommitted code changes in a git repository."
+            description="An AI agent that reviews code changes in a git repository. It can review local uncommitted changes or all changes against a specified branch."
         )
         parser.add_argument(
             "--task", type=str, required=True,
@@ -252,6 +291,16 @@ class CliManager:
             "--app-description", type=str, default="app_description.txt",
             help="Path to a text file describing the app's purpose for better context."
         )
+        parser.add_argument(
+            "--compare", type=str, default=None,
+            help="The git branch to compare against (e.g., 'origin/main'). If provided, reviews committed and local changes against this branch."
+        )
+        parser.add_argument(
+            "--strict",
+            type=lambda x: (str(x).lower() == 'true'),
+            default=True,
+            help="Whether the AI should restrict comments to only those needed for the task (default: True). Use --strict=false for more liberal feedback."
+        )
         args = parser.parse_args()
 
         # --- 1. Initial Setup ---
@@ -260,9 +309,12 @@ class CliManager:
         if not all_git_files:
             return
         
-        changed_files = self._get_changed_files(args.dir)
+        changed_files = self._get_changed_files(args.dir, args.compare)
         if not changed_files:
-            logging.info("No local changes detected. Exiting.")
+            if args.compare:
+                logging.info(f"No changes detected compared to '{args.compare}'. Exiting.")
+            else:
+                logging.info("No local changes detected. Exiting.")
             return
 
         # --- 2. Initial Analysis ---
@@ -307,7 +359,7 @@ class CliManager:
             file_content = context_data[file_to_review]
             
             review_result = self.ai_agent.review_file_content(
-                args.task, full_context, file_to_review, file_content
+                args.task, full_context, file_to_review, file_content, strict=args.strict
             )
             all_reviews.append(review_result)
 
