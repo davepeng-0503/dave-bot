@@ -8,7 +8,7 @@ import subprocess
 import threading
 import time
 import webbrowser
-from typing import Callable, Dict, List, Optional, Set
+from typing import Callable, Any, Dict, List, Optional, Set
 
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
@@ -107,7 +107,7 @@ class GeneratedCode(BaseModel):
 class AiCodeAgent(BaseAiAgent):
     """Handles all interactions with the Gemini AI model."""
 
-    def get_initial_analysis(self, task: str, file_list: List[str], app_description: str = "", feedback: Optional[str] = None, previous_plan: Optional[CodeAnalysis] = None, git_grep_search_tool: Optional[Callable] = None, read_file_tool: Optional[Callable] = None, grep_results: Optional[str] = None) -> CodeAnalysis:
+    def get_initial_analysis(self, task: str, file_list: List[str], app_description: str = "", feedback: Optional[str] = None, previous_plan: Optional[CodeAnalysis] = None, git_grep_search_tool: Optional[Callable[..., Any]] = None, read_file_tool: Optional[Callable[..., Any]] = None, grep_results: Optional[str] = None) -> CodeAnalysis:
         """Runs the agent to get the code analysis, potentially using feedback or a search tool."""
         
         system_prompt = f"""
@@ -166,7 +166,7 @@ Now, please provide your final analysis. You should be confident enough to not r
 Please provide your analysis. Use the `git_grep_search_tool` and `read_file_tool` if you need to find specific code snippets or understand file contents. If you are not confident in your plan, request more grep searches by populating `additional_grep_queries_needed`.
 """
         
-        tools: List[Callable] = []
+        tools: List[Callable[..., Any]] = []
         if git_grep_search_tool:
             tools.append(git_grep_search_tool)
         if read_file_tool:
@@ -256,14 +256,14 @@ Original content of `{file_path}`:
 class CliManager:
     """Manages CLI interactions, file I/O, and orchestrates the analysis and code generation."""
 
-    status_queue: Optional[queue.Queue]
+    status_queue: Optional[queue.Queue[Dict[str, Any]]]
     
     def __init__(self):
         """Initializes the CLI manager and the AI code agent."""
         self.ai_agent = AiCodeAgent()
         self.args = self._parse_args()
         self.agent_tools = AgentTools(self.args.dir)
-        self.status_queue: Optional[queue.Queue] = None
+        self.status_queue:  Optional[queue.Queue[Dict[str, Any]]] = None
 
     def _parse_args(self) -> argparse.Namespace:
         """Parses command-line arguments."""
@@ -331,8 +331,8 @@ class CliManager:
 
         logging.warning("Analysis Warning: Mismatch found between planned files and generation order. Reconciling lists using 'generation_order' as the source of truth.")
 
-        new_files_to_edit = []
-        new_files_to_create = []
+        new_files_to_edit: List[str] = []
+        new_files_to_create: List[NewFile] = []
         
         # Keep existing NewFile objects if they are in the generation order
         existing_creations = {f.file_path: f for f in analysis.files_to_create}
@@ -549,7 +549,7 @@ class CliManager:
                     logging.info("✅ Plan approved by user. Proceeding with code generation.")
                     # Handle model override from user
                     if data and isinstance(data, dict) and 'use_flash_model' in data:
-                        override_value = data.get('use_flash_model', False)
+                        override_value: bool = bool(data.get('use_flash_model', False)) # type: ignore
                         if analysis.use_flash_model != override_value:
                             analysis.use_flash_model = override_value
                             logging.info(f"Model selection overridden by user. 'Use Gemini Flash' is now set to: {analysis.use_flash_model}")

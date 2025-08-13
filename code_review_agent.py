@@ -4,7 +4,7 @@ import json
 import logging
 import os
 import subprocess
-from typing import Callable, Dict, List, Literal, Optional, Tuple
+from typing import Callable, Dict, List, Literal, Optional, Tuple, Any
 
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
@@ -68,7 +68,7 @@ class AiCodeReviewAgent(BaseAiAgent):
     """Handles all AI interactions for conducting a code review."""
 
     def get_review_analysis(
-        self, task: str, all_files: List[str], changed_files: List[str], app_description: str = "", feedback: Optional[str] = None, git_grep_search_tool: Optional[Callable] = None, read_file_tool: Optional[Callable] = None, grep_results: Optional[str] = None
+        self, task: str, all_files: List[str], changed_files: List[str], app_description: str = "", feedback: Optional[str] = None, git_grep_search_tool: Optional[Callable[..., Any]] = None, read_file_tool: Optional[Callable[..., Any]] = None, grep_results: Optional[str] = None
     ) -> ReviewAnalysis:
         """Determines which files to review and which are needed for context."""
         system_prompt = f"""
@@ -121,7 +121,7 @@ Now, please provide your final analysis. You should be confident enough to not r
 Please provide your analysis. Use the `git_grep_search_tool` and `read_file_tool` if you need to find specific code snippets or understand file contents. If you are not confident in your plan, request more grep searches by populating `additional_grep_queries_needed`.
 """
         
-        tools: List[Callable] = []
+        tools: List[Callable[..., Any]] = []
         if git_grep_search_tool:
             tools.append(git_grep_search_tool)
         if read_file_tool:
@@ -455,7 +455,7 @@ class ReviewCliManager:
                 analysis_retries += 1
                 logging.info("🤖 AI has requested more information via git grep to improve its review plan. Running queries.")
                 
-                new_results = []
+                new_results: List[str] = []
                 for query in current_analysis.additional_grep_queries_needed:
                     result = self.agent_tools.git_grep_search(query)
                     new_results.append(result)

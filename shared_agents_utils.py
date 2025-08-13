@@ -365,7 +365,7 @@ class ApprovalWebServer(socketserver.TCPServer):
 
     allow_reuse_address = True
 
-    def __init__(self, server_address: Tuple[str, int], RequestHandlerClass, html_file_path: str):
+    def __init__(self, server_address: Tuple[str, int], RequestHandlerClass: Any, html_file_path: str):
         super().__init__(server_address, RequestHandlerClass)
         self.html_file_path = html_file_path
         self.decision_made = threading.Event()
@@ -482,7 +482,7 @@ def wait_for_user_approval_from_browser(
     # functools.partial is a good way to do this.
     # handler = functools.partial(ApprovalHandler, html_file_path=html_file_path)
     
-    def handler(*args, **kwargs):
+    def handler(*args: Any, **kwargs: Any):
         return ApprovalHandler(*args, **kwargs)
 
     try:
