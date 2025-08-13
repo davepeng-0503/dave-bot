@@ -459,6 +459,8 @@ class CliManager:
 </style>
 """
 
+    status_queue: Optional[queue.Queue]
+    
     def __init__(self):
         """Initializes the CLI manager and the AI code agent."""
         self.ai_agent = AiCodeAgent()
@@ -951,8 +953,9 @@ class CliManager:
                     def do_GET(self):
                         if self.path == '/status':
                             try:
-                                update = self.cli_manager.status_queue.get(block=True, timeout=28)
-                                self._send_response(200, 'application/json', json.dumps(update).encode('utf-8'))
+                                if self.cli_manager.status_queue:
+                                    update = self.cli_manager.status_queue.get(block=True, timeout=28)
+                                    self._send_response(200, 'application/json', json.dumps(update).encode('utf-8'))
                             except (queue.Empty, AttributeError):
                                 self._send_response(204, 'text/plain', b'')
                         else:
