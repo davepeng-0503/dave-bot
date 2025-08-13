@@ -16,7 +16,7 @@ import markdown
 # The agent files will import this module, and this module needs type hints from them.
 if TYPE_CHECKING:
     from advise_agent import Advice, AdviceAnalysis
-    from code_agent import CodeAnalysis, GeneratedCode, NewFile
+    from code_agent import CodeAnalysis, NewFile
 
 
 # --- Shared HTML Components ---
