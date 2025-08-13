@@ -110,6 +110,15 @@ class GeneratedCode(BaseModel):
 class AiCodeAgent(BaseAiAgent):
     """Handles all interactions with the Gemini AI model."""
 
+    def __init__(self, status_queue: Optional[queue.Queue[Dict[str, Any]]] = None):
+        super().__init__()
+        self.status_queue = status_queue
+
+    def _log_info(self, message: str, icon: str = "ℹ️"):
+        logging.info(message)
+        if self.status_queue:
+            self.status_queue.put({"status": "cli_log", "message": message, "icon": icon, "cssClass": ""})
+
     def get_initial_analysis(self, task: str, file_list: List[str], app_description: str = "", feedback: Optional[str] = None, previous_plan: Optional[CodeAnalysis] = None, git_grep_search_tool: Optional[Callable[..., Any]] = None, read_file_tool: Optional[Callable[..., Any]] = None, grep_results: Optional[str] = None) -> CodeAnalysis:
         """Runs the agent to get the code analysis, potentially using feedback or a search tool."""
         
@@ -183,13 +192,16 @@ Please provide your analysis. Use the `git_grep_search_tool` and `read_file_tool
             tools=tools
         )
         
-        log_message = "🤖 Conducting initial codebase analysis..."
+        log_message = "Conducting initial codebase analysis..."
+        icon = "🤖"
         if feedback:
-            log_message = f"🔁 Re-analyzing codebase with feedback: {feedback}"
+            log_message = f"Re-analyzing codebase with feedback: {feedback}"
+            icon = "🔁"
         elif grep_results:
-            log_message = "🤔 Re-evaluating plan with new grep results..."
+            log_message = "Re-evaluating plan with new grep results..."
+            icon = "🤔"
 
-        logging.info(log_message)
+        self._log_info(log_message, icon=icon)
         
         analysis = analysis_agent.run_sync(
             prompt,
@@ -247,7 +259,7 @@ Original content of `{file_path}`:
             system_prompt=system_prompt
         )
         
-        logging.info(f"💡 Generating new code for {file_path} using {model_name}...")
+        self._log_info(f"Generating new code for {file_path} using {model_name}...", icon="💡")
         generated_code = generation_agent.run_sync(
             prompt,
             model_settings=GoogleModelSettings(google_safety_settings=self.get_safety_settings()),
@@ -264,11 +276,26 @@ class CliManager:
     
     def __init__(self):
         """Initializes the CLI manager and the AI code agent."""
-        self.ai_agent = AiCodeAgent()
         self.args = self._parse_args()
         self.status_queue = queue.Queue()
+        self.ai_agent = AiCodeAgent(status_queue=self.status_queue)
         # Pass the queue to AgentTools to capture tool usage during analysis
         self.agent_tools = AgentTools(self.args.dir, status_queue=self.status_queue)
+
+    def _log_info(self, message: str, icon: str = "ℹ️"):
+        logging.info(message)
+        if not self.args.force:
+            self.status_queue.put({"status": "cli_log", "message": message, "icon": icon, "cssClass": ""})
+
+    def _log_warning(self, message: str, icon: str = "⚠️"):
+        logging.warning(message)
+        if not self.args.force:
+            self.status_queue.put({"status": "cli_log", "message": message, "icon": icon, "cssClass": "warning"})
+
+    def _log_error(self, message: str, icon: str = "❌"):
+        logging.error(message)
+        if not self.args.force:
+            self.status_queue.put({"status": "cli_log", "message": message, "icon": icon, "cssClass": "error"})
 
     def _parse_args(self) -> argparse.Namespace:
         """Parses command-line arguments."""
@@ -312,11 +339,11 @@ class CliManager:
             )
             if untracked_result.returncode == 0 and untracked_result.stdout:
                 untracked_files = untracked_result.stdout.strip().split("\n")
-                logging.info(f"Found {len(untracked_files)} untracked files.")
+                self._log_info(f"Found {len(untracked_files)} untracked files.")
                 return sorted(list(set(git_files + untracked_files)))
             return git_files
         except Exception as e:
-            logging.warning(f"Could not get untracked git files: {e}. Proceeding with tracked files only.")
+            self._log_warning(f"Could not get untracked git files: {e}. Proceeding with tracked files only.")
             return git_files
 
     def _reconcile_and_validate_analysis(self, analysis: CodeAnalysis, all_repo_files: List[str]) -> bool:
@@ -325,7 +352,7 @@ class CliManager:
         and adjusts `files_to_edit` and `files_to_create` to match it, ensuring consistency.
         """
         if not analysis:
-            logging.error("Cannot validate a null analysis.")
+            self._log_error("Cannot validate a null analysis.")
             return False
 
         planned_files: Set[str] = set(analysis.files_to_edit) | {f.file_path for f in analysis.files_to_create}
@@ -334,7 +361,7 @@ class CliManager:
         if planned_files == ordered_files:
             return True  # No mismatch, nothing to do.
 
-        logging.warning("Analysis Warning: Mismatch found between planned files and generation order. Reconciling lists using 'generation_order' as the source of truth.")
+        self._log_warning("Mismatch found between planned files and generation order. Reconciling lists using 'generation_order' as the source of truth.")
 
         new_files_to_edit: List[str] = []
         new_files_to_create: List[NewFile] = []
@@ -355,7 +382,7 @@ class CliManager:
                     new_files_to_create.append(existing_creations[file_path])
                 else:
                     # Create a placeholder NewFile object
-                    logging.warning(f"  - File '{file_path}' from generation_order was not in files_to_create. Adding it.")
+                    self._log_warning(f"File '{file_path}' from generation_order was not in files_to_create. Adding it.")
                     new_files_to_create.append(NewFile(
                         file_path=file_path,
                         reasoning="File was added to the plan to match the generation order."
@@ -363,24 +390,24 @@ class CliManager:
         
         # Log what was removed from the original plan
         for file_path in planned_files - ordered_files:
-            logging.warning(f"  - File '{file_path}' was in the original plan but not in generation_order. Removing it.")
+            self._log_warning(f"File '{file_path}' was in the original plan but not in generation_order. Removing it.")
 
         analysis.files_to_edit = sorted(new_files_to_edit)
         analysis.files_to_create = sorted(new_files_to_create, key=lambda f: f.file_path)
         
-        logging.info("✅ Analysis plan reconciled successfully.")
+        self._log_info("Analysis plan reconciled successfully.", icon="✅")
         return True
 
     def _create_and_checkout_branch(self, branch_name: str) -> bool:
         """Creates and checks out a new git branch."""
         try:
-            logging.info(f"🌿 Creating and switching to new branch: {branch_name}")
+            self._log_info(f"Creating and switching to new branch: {branch_name}", icon="🌿")
             # Check if branch already exists
             check_branch_cmd = ["git", "rev-parse", "--verify", branch_name]
             branch_exists = subprocess.run(check_branch_cmd, cwd=self.args.dir, capture_output=True, text=True).returncode == 0
             
             if branch_exists:
-                logging.warning(f"Branch '{branch_name}' already exists. Checking it out.")
+                self._log_warning(f"Branch '{branch_name}' already exists. Checking it out.")
                 command = ["git", "checkout", branch_name]
             else:
                 command = ["git", "checkout", "-b", branch_name]
@@ -393,34 +420,34 @@ class CliManager:
                 check=True,
                 encoding="utf-8",
             )
-            logging.info(f"✅ Switched to branch '{branch_name}'.")
+            self._log_info(f"Switched to branch '{branch_name}'.", icon="✅")
             return True
         except subprocess.CalledProcessError as e:
-            logging.error(f"❌ Failed to create or checkout branch '{branch_name}': {e.stderr}")
+            self._log_error(f"Failed to create or checkout branch '{branch_name}': {e.stderr}")
             return False
         except FileNotFoundError:
-            logging.error("❌ 'git' command not found. Is Git installed and in your PATH?")
+            self._log_error("'git' command not found. Is Git installed and in your PATH?")
             return False
 
     def _commit_and_push_changes(self, branch_name: str, commit_message: str) -> bool:
         """Adds all changes, commits them, and pushes the branch to origin."""
         try:
-            logging.info("💾 Staging changes...")
+            self._log_info("Staging changes...", icon="💾")
             subprocess.run(["git", "add", "."], cwd=self.args.dir, check=True)
 
-            logging.info(f"📝 Committing changes with message: '{commit_message}'")
+            self._log_info(f"Committing changes with message: '{commit_message}'", icon="📝")
             subprocess.run(["git", "commit", "-m", commit_message], cwd=self.args.dir, check=True)
 
-            logging.info(f"🚀 Pushing branch '{branch_name}' to origin...")
+            self._log_info(f"Pushing branch '{branch_name}' to origin...", icon="🚀")
             subprocess.run(["git", "push", "-u", "origin", branch_name], cwd=self.args.dir, check=True)
             
-            logging.info("✅ Changes committed and pushed successfully.")
+            self._log_info("Changes committed and pushed successfully.", icon="✅")
             return True
         except subprocess.CalledProcessError as e:
-            logging.error(f"❌ Git operation failed: {e.stderr}")
+            self._log_error(f"Git operation failed: {e.stderr}")
             return False
         except FileNotFoundError:
-            logging.error("❌ 'git' command not found.")
+            self._log_error("'git' command not found.")
             return False
 
     def _create_pull_request(self, branch_name: str, title: str, body: str) -> bool:
@@ -428,12 +455,12 @@ class CliManager:
         try:
             subprocess.run(["gh", "--version"], check=True, capture_output=True, text=True)
         except (FileNotFoundError, subprocess.CalledProcessError):
-            logging.warning("⚠️ 'gh' command not found or not configured. Cannot create pull request.")
-            logging.warning(f"Please create the pull request manually for branch '{branch_name}'.")
+            self._log_warning("'gh' command not found or not configured. Cannot create pull request.")
+            self._log_warning(f"Please create the pull request manually for branch '{branch_name}'.")
             return False
 
         try:
-            logging.info(f"📦 Creating pull request for branch '{branch_name}'...")
+            self._log_info(f"Creating pull request for branch '{branch_name}'...", icon="📦")
             command = [
                 "gh", "pr", "create",
                 "--title", title,
@@ -451,22 +478,22 @@ class CliManager:
                 encoding="utf-8",
             )
             pr_url = result.stdout.strip()
-            logging.info(f"✅ Successfully created pull request: {pr_url}")
+            self._log_info(f"Successfully created pull request: {pr_url}", icon="✅")
             return True
         except subprocess.CalledProcessError as e:
             if "a pull request for" in e.stderr and "already exists" in e.stderr:
-                logging.warning(f"⚠️ A pull request for branch '{branch_name}' already exists.")
+                self._log_warning(f"A pull request for branch '{branch_name}' already exists.")
                 try:
                     pr_list_cmd = ["gh", "pr", "list", "--head", branch_name, "--json", "url"]
                     pr_list_result = subprocess.run(pr_list_cmd, cwd=self.args.dir, capture_output=True, text=True, check=True)
                     pr_info = json.loads(pr_list_result.stdout)
                     if pr_info:
-                        logging.info(f"Existing PR URL: {pr_info[0]['url']}")
+                        self._log_info(f"Existing PR URL: {pr_info[0]['url']}")
                 except Exception as find_e:
-                    logging.warning(f"Could not retrieve existing PR URL: {find_e}")
+                    self._log_warning(f"Could not retrieve existing PR URL: {find_e}")
                 return True
             
-            logging.error(f"❌ Failed to create pull request: {e.stderr}")
+            self._log_error(f"Failed to create pull request: {e.stderr}")
             return False
 
     def _execute_generation_loop(self, analysis: CodeAnalysis, all_repo_files: List[str], app_desc_content: str) -> List[str]:
@@ -481,7 +508,7 @@ class CliManager:
 
         while files_to_process and retries <= MAX_REANALYSIS_RETRIES:
             if feedback_for_reanalysis:
-                logging.info("--- Re-running Analysis with Feedback ---")
+                self._log_info("--- Re-running Analysis with Feedback ---", icon="🔁")
                 analysis = self.ai_agent.get_initial_analysis(
                     self.args.task, all_repo_files, app_desc_content, feedback=feedback_for_reanalysis, previous_plan=analysis, git_grep_search_tool=self.agent_tools.git_grep_search, read_file_tool=self.agent_tools.read_file
                 )
@@ -512,7 +539,7 @@ class CliManager:
                 )
 
                 if generated_code.requires_more_context:
-                    logging.warning(f"Generator needs more context for {file_path}: {generated_code.context_request}")
+                    self._log_warning(f"Generator needs more context for {file_path}: {generated_code.context_request}")
                     feedback_for_reanalysis = generated_code.context_request
                     retries += 1
                     reanalysis_needed = True
@@ -532,7 +559,7 @@ class CliManager:
 
                 # Dynamically load more context if requested for future files
                 if generated_code.needed_context_for_future_files:
-                    logging.info(f"Agent requested more context for future steps: {generated_code.needed_context_for_future_files}")
+                    self._log_info(f"Agent requested more context for future steps: {generated_code.needed_context_for_future_files}")
                     for new_context_file in generated_code.needed_context_for_future_files:
                         if new_context_file not in context_data:
                             content = read_file_content(self.args.dir, new_context_file)
@@ -550,12 +577,12 @@ class CliManager:
     def _report_final_status(self, unprocessed_files: List[str]):
         """Prints the final status of the code generation task."""
         if unprocessed_files:
-            logging.error(f"❌ Failed to complete the task after {MAX_REANALYSIS_RETRIES} retries.")
-            logging.error("The following files were not processed:")
+            self._log_error(f"Failed to complete the task after {MAX_REANALYSIS_RETRIES} retries.")
+            self._log_error("The following files were not processed:")
             for file_path in unprocessed_files:
-                logging.error(f"  - {file_path}")
+                self._log_error(f"  - {file_path}")
         else:
-            logging.info("✅ All changes have been successfully applied.")
+            self._log_info("All changes have been successfully applied.", icon="✅")
 
     def run(self):
         """The main entry point for the CLI tool."""
@@ -563,7 +590,7 @@ class CliManager:
         app_desc_content = read_file_content(self.args.dir, self.args.app_description) or ""
         all_repo_files = self._get_all_repository_files()
         if not all_repo_files:
-            logging.error("No tracked or untracked files found. Exiting.")
+            self._log_error("No tracked or untracked files found. Exiting.")
             return
 
         # 2. Start Web Server and open browser
@@ -571,7 +598,7 @@ class CliManager:
         if not self.args.force:
             viewer_html_path = create_code_agent_html_viewer(self.args.port)
             if not viewer_html_path:
-                logging.error("Failed to create the HTML viewer file.")
+                self._log_error("Failed to create the HTML viewer file.")
                 return
 
             class StatusAwareApprovalHandler(ApprovalHandler):
@@ -593,10 +620,10 @@ class CliManager:
             server_thread = threading.Thread(target=server.serve_forever)
             server_thread.daemon = True
             server_thread.start()
-            logging.info(f"🌐 Interactive viewer is running. Opening in your browser...")
+            self._log_info(f"Interactive viewer is running. Opening in your browser...", icon="🌐")
             webbrowser.open(f"file://{os.path.realpath(viewer_html_path)}")
         else:
-            logging.info("Running in non-interactive mode due to --force flag.")
+            self._log_info("Running in non-interactive mode due to --force flag.")
 
         analysis: Optional[CodeAnalysis] = None
         try:
@@ -629,7 +656,7 @@ class CliManager:
                         )
                         if current_analysis.additional_grep_queries_needed:
                             analysis_retries += 1
-                            logging.info("🤖 AI has requested more information via git grep. Running queries...")
+                            self._log_info("AI has requested more information via git grep. Running queries...", icon="🤖")
                             new_results = [self.agent_tools.git_grep_search(q) for q in current_analysis.additional_grep_queries_needed]
                             grep_results = "\n\n".join(new_results)
                             analysis = None
@@ -639,25 +666,25 @@ class CliManager:
                     if not analysis:
                         if server:
                             self.status_queue.put({"status": "error", "message": f"Failed to get a confident analysis after {MAX_ANALYSIS_GREP_RETRIES} attempts."})
-                        logging.error(f"❌ Failed to get a confident analysis after {MAX_ANALYSIS_GREP_RETRIES} attempts.")
+                        self._log_error(f"Failed to get a confident analysis after {MAX_ANALYSIS_GREP_RETRIES} attempts.")
                         return
 
                 # B. Reconcile analysis
                 if not self._reconcile_and_validate_analysis(analysis, all_repo_files):
                     if server:
                         self.status_queue.put({"status": "error", "message": "Failed to reconcile the analysis plan."})
-                    logging.error("Failed to reconcile the analysis plan. Aborting.")
+                    self._log_error("Failed to reconcile the analysis plan. Aborting.")
                     return
                 
                 if not analysis.generation_order:
-                    logging.info("AI analysis resulted in no files to change. Exiting.")
+                    self._log_info("AI analysis resulted in no files to change. Exiting.")
                     if server:
                         self.status_queue.put({"status": "finished", "message": "AI analysis resulted in no files to change."})
                     return
 
                 # C. User Confirmation
                 if not self.args.force and server:
-                    logging.info("✅ Analysis complete. Awaiting user confirmation in browser.")
+                    self._log_info("Analysis complete. Awaiting user confirmation in browser.", icon="✅")
                     self.status_queue.put({
                         "status": "plan_ready",
                         "plan": json.loads(analysis.model_dump_json()),
@@ -667,38 +694,37 @@ class CliManager:
                     decision, data = server.wait_for_decision()
 
                     if decision == 'approve':
-                        logging.info("✅ Plan approved by user. Proceeding with code generation.")
+                        self._log_info("Plan approved by user. Proceeding with code generation.", icon="✅")
                         if data and isinstance(data, dict) and 'use_flash_model' in data:
                             override_value: bool = bool(data.get('use_flash_model', False))
                             if analysis.use_flash_model != override_value:
                                 analysis.use_flash_model = override_value
-                                logging.info(f"Model selection overridden by user. 'Use Gemini Flash' is now set to: {analysis.use_flash_model}")
+                                self._log_info(f"Model selection overridden by user. 'Use Gemini Flash' is now set to: {analysis.use_flash_model}")
                         
                         if not self._create_and_checkout_branch(analysis.branch_name):
                             self.status_queue.put({"status": "error", "message": "Could not create git branch."})
-                            logging.error("Could not create git branch. Aborting.")
+                            self._log_error("Could not create git branch. Aborting.")
                             return
                         break # Exit feedback loop
                     elif decision == 'reject':
-                        logging.info("❌ Plan rejected by user. Operation cancelled.")
+                        self._log_info("Plan rejected by user. Operation cancelled.", icon="❌")
                         return
                     elif decision == 'feedback':
                         user_feedback = data
                         previous_analysis = analysis
                         feedback_loop += 1
-                        logging.info("Re-running analysis with new feedback...")
-                        # The loop will continue, and the JS will show the planning view again.
+                        # The get_initial_analysis call will log the re-analysis message.
                         decision = None
                         data = None
                         server.reset_decision()
                         continue
                     else:
-                        logging.error("No decision received from the browser. Exiting.")
+                        self._log_error("No decision received from the browser. Exiting.")
                         return
                 else: # --force is on
-                    logging.info("✅ Plan approved automatically (--force).")
+                    self._log_info("Plan approved automatically (--force).", icon="✅")
                     if not self._create_and_checkout_branch(analysis.branch_name):
-                        logging.error("Could not create git branch. Aborting.")
+                        self._log_error("Could not create git branch. Aborting.")
                         return
                     break # Exit feedback loop
 
@@ -709,23 +735,23 @@ class CliManager:
             self._report_final_status(unprocessed_files)
 
             if not unprocessed_files:
-                logging.info("All files processed. Proceeding with git operations.")
+                self._log_info("All files processed. Proceeding with git operations.")
                 commit_message = f"feat: {self.args.task}\n\n{analysis.reasoning}"
                 if self._commit_and_push_changes(analysis.branch_name, commit_message):
-                    pr_title = f"AI-Gen: {self.args.task}"
+                    pr_title = f"AI-Gen: {analysis.branch_name}"
                     pr_body = f"This PR was automatically generated by an AI agent to address the following task:\n\n**Task:** {self.args.task}\n\n**AI's Plan:**\n"
                     for i, step in enumerate(analysis.plan):
                         pr_body += f"{i+1}. {step}\n"
                     self._create_pull_request(analysis.branch_name, pr_title, pr_body)
             else:
-                logging.warning("Some files were not processed. Skipping git commit and PR creation.")
+                self._log_warning("Some files were not processed. Skipping git commit and PR creation.")
 
             if server and self.status_queue:
                 self.status_queue.put({"status": "finished"})
                 time.sleep(2) # Give browser time to fetch final status
         finally:
             if server:
-                logging.info("Shutting down web server.")
+                self._log_info("Shutting down web server.", icon="🔌")
                 server.shutdown()
                 server.server_close()
 
