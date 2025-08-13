@@ -339,7 +339,7 @@ def create_code_plan_html(analysis: "CodeAnalysis", task: str, port: int) -> Opt
     if not analysis:
         return None
 
-    plan_html = "".join([f'<li>{markdown.markdown(step, extensions=["fenced_code", "tables"])}</li>' for step in analysis.plan])
+    plan_html = "".join([f'{markdown.markdown(step, extensions=["fenced_code", "tables"])}' for step in analysis.plan])
 
     html_content = f"""
 <!DOCTYPE html>
@@ -361,9 +361,7 @@ def create_code_plan_html(analysis: "CodeAnalysis", task: str, port: int) -> Opt
 
         <div class="container">
             <h2>High-level Plan</h2>
-            <ol>
-                {plan_html if analysis.plan else "<li>No plan provided.</li>"}
-            </ol>
+            {plan_html if analysis.plan else "<p>No plan provided.</p>"}
         </div>
 
         <div class="container">
