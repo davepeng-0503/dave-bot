@@ -102,7 +102,7 @@ class GeneratedCode(BaseModel):
 class AiCodeAgent(BaseAiAgent):
     """Handles all interactions with the Gemini AI model."""
 
-    def get_initial_analysis(self, task: str, file_list: List[str], app_description: str = "", feedback: Optional[str] = None, git_grep_search_tool: Optional[Callable] = None, read_file_tool: Optional[Callable] = None, grep_results: Optional[str] = None) -> CodeAnalysis:
+    def get_initial_analysis(self, task: str, file_list: List[str], app_description: str = "", feedback: Optional[str] = None, previous_plan: Optional[CodeAnalysis] = None, git_grep_search_tool: Optional[Callable] = None, read_file_tool: Optional[Callable] = None, grep_results: Optional[str] = None) -> CodeAnalysis:
         """Runs the agent to get the code analysis, potentially using feedback or a search tool."""
         
         system_prompt = f"""
@@ -132,13 +132,14 @@ Project Description:
 ---
 """
         if feedback:
-            system_prompt += f"""
----
-IMPORTANT: This is a re-analysis. A previous attempt failed due to insufficient context.
-The programmer's feedback was: "{feedback}"
-Please adjust your file selection and plan. You might need to use your tools or add more files to `relevant_files` to satisfy the context request. You must provide a full plan this time and not ask for more grep queries.
----
-"""
+            prompt_addition = "\n---\n"
+            prompt_addition += "IMPORTANT: This is a re-analysis. You must generate a new plan.\n"
+            if previous_plan:
+                prompt_addition += f"\nHere was the previous plan you created:\n{previous_plan.model_dump_json(indent=2)}\n"
+            
+            prompt_addition += f"\nThe feedback provided is: \"{feedback}\"\n"
+            prompt_addition += "\nPlease create a new, complete plan that addresses the feedback. You must provide a full plan this time and not ask for more grep queries.\n---"
+            system_prompt += prompt_addition
 
         prompt = f"""
 Full list of files in the repository:
@@ -363,7 +364,7 @@ class CliManager:
             if feedback_for_reanalysis:
                 logging.info("--- Re-running Analysis with Feedback ---")
                 analysis = self.ai_agent.get_initial_analysis(
-                    self.args.task, all_repo_files, app_desc_content, feedback=feedback_for_reanalysis, git_grep_search_tool=self._git_grep_search_tool, read_file_tool=self._read_file_content_tool
+                    self.args.task, all_repo_files, app_desc_content, feedback=feedback_for_reanalysis, previous_plan=analysis, git_grep_search_tool=self._git_grep_search_tool, read_file_tool=self._read_file_content_tool
                 )
                 files_to_process = analysis.generation_order
                 feedback_for_reanalysis = ""  # Reset feedback
@@ -436,79 +437,111 @@ class CliManager:
             logging.error("No tracked or untracked files found. Exiting.")
             return
 
-        # 2. Iterative Analysis to get a confident plan
-        analysis = None
-        grep_results = ""
-        analysis_retries = 0
+        # 2. Analysis and Confirmation Loop
+        analysis: Optional[CodeAnalysis] = None
+        previous_analysis: Optional[CodeAnalysis] = None
+        user_feedback: Optional[str] = None
 
-        while analysis_retries < MAX_ANALYSIS_GREP_RETRIES:
-            current_analysis = self.ai_agent.get_initial_analysis(
-                self.args.task,
-                all_repo_files,
-                app_desc_content,
-                git_grep_search_tool=self._git_grep_search_tool,
-                read_file_tool=self._read_file_content_tool,
-                grep_results=grep_results or None
-            )
-
-            if current_analysis.additional_grep_queries_needed:
-                analysis_retries += 1
-                logging.info("🤖 AI has requested more information via git grep to improve its plan.")
-                print("\nThe AI wants to run the following grep queries to build a better plan:")
-                for query in current_analysis.additional_grep_queries_needed:
-                    print(f"  - git grep -i -n \"{query}\"")
-                
-                if not self.args.force:
-                    proceed = input("\nProceed with running these grep commands? (y/n): ").lower()
-                    if proceed != 'y':
-                        logging.warning("User cancelled grep search. Aborting analysis.")
-                        return
-
-                new_results = []
-                for query in current_analysis.additional_grep_queries_needed:
-                    result = self._git_grep_search_tool(query)
-                    new_results.append(result)
-                
-                grep_results = "\n\n".join(new_results)
-                analysis = None  # Not a final analysis
+        while True:  # This loop handles user feedback on the plan
+            # A. Get Analysis
+            if user_feedback:
+                # We have feedback, so we re-run the analysis.
+                # The AI is instructed not to ask for grep queries when feedback is provided.
+                logging.info(f"🔁 Re-analyzing plan with user feedback: '{user_feedback}'")
+                analysis = self.ai_agent.get_initial_analysis(
+                    self.args.task,
+                    all_repo_files,
+                    app_desc_content,
+                    feedback=user_feedback,
+                    previous_plan=previous_analysis,
+                    git_grep_search_tool=self._git_grep_search_tool,
+                    read_file_tool=self._read_file_content_tool
+                )
+                user_feedback = None  # Reset feedback for the next loop iteration
             else:
-                analysis = current_analysis
-                break  # We have a final analysis
+                # This is the first run, so we might need the grep confidence loop.
+                grep_results = ""
+                analysis_retries = 0
+                while analysis_retries < MAX_ANALYSIS_GREP_RETRIES:
+                    current_analysis = self.ai_agent.get_initial_analysis(
+                        self.args.task,
+                        all_repo_files,
+                        app_desc_content,
+                        git_grep_search_tool=self._git_grep_search_tool,
+                        read_file_tool=self._read_file_content_tool,
+                        grep_results=grep_results or None
+                    )
 
-        if not analysis:
-            logging.error(f"❌ Failed to get a confident analysis from the AI after {MAX_ANALYSIS_GREP_RETRIES} attempts.")
-            return
+                    if current_analysis.additional_grep_queries_needed:
+                        analysis_retries += 1
+                        logging.info("🤖 AI has requested more information via git grep to improve its plan.")
+                        print("\nThe AI wants to run the following grep queries to build a better plan:")
+                        for query in current_analysis.additional_grep_queries_needed:
+                            print(f"  - git grep -i -n \"{query}\"")
+                        
+                        if not self.args.force:
+                            proceed = input("\nProceed with running these grep commands? (y/n): ").lower()
+                            if proceed != 'y':
+                                logging.warning("User cancelled grep search. Aborting analysis.")
+                                return
 
-        # 3. Display Analysis & User Confirmation
-        print("\n--- 🤖 AI Code Analysis Result ---")
-        print(f"Task: {self.args.task}\n")
-        print("High-level Plan:")
-        if analysis.plan:
-            for i, step in enumerate(analysis.plan, 1):
-                print(f"  {i}. {step}")
-        else:
-            print("  No plan provided.")
-        
-        print(f"\nOverall Reasoning:\n {analysis.reasoning}\n")
-        print("Relevant Files for Context:", analysis.relevant_files or "None")
-        print("Files to Edit:", analysis.files_to_edit or "None")
-        print("Files to Create:", [f.file_path for f in analysis.files_to_create] or "None")
-        print("Proposed Generation Order:", analysis.generation_order or "None")
-        print("---------------------------------\n")
+                        new_results = []
+                        for query in current_analysis.additional_grep_queries_needed:
+                            result = self._git_grep_search_tool(query)
+                            new_results.append(result)
+                        
+                        grep_results = "\n\n".join(new_results)
+                        analysis = None  # Not a final analysis
+                    else:
+                        analysis = current_analysis
+                        break  # We have a final analysis
 
-        if not self._validate_analysis(analysis):
-            return
-        
-        if not analysis.generation_order:
-            logging.info("AI analysis resulted in no files to change. Exiting.")
-            return
+                if not analysis:
+                    logging.error(f"❌ Failed to get a confident analysis from the AI after {MAX_ANALYSIS_GREP_RETRIES} attempts.")
+                    return
 
-        # 4. User Confirmation
-        if not self.args.force:
-            proceed = input("Proceed with generating and writing file changes? (y/n): ").lower()
-            if proceed != 'y':
-                logging.info("Operation cancelled by user.")
+            # B. Display Analysis
+            print("\n--- 🤖 AI Code Analysis Result ---")
+            print(f"Task: {self.args.task}\n")
+            print("High-level Plan:")
+            if analysis.plan:
+                for i, step in enumerate(analysis.plan, 1):
+                    print(f"  {i}. {step}")
+            else:
+                print("  No plan provided.")
+            
+            print(f"\nOverall Reasoning:\n {analysis.reasoning}\n")
+            print("Relevant Files for Context:", analysis.relevant_files or "None")
+            print("Files to Edit:", analysis.files_to_edit or "None")
+            print("Files to Create:", [f.file_path for f in analysis.files_to_create] or "None")
+            print("Proposed Generation Order:", analysis.generation_order or "None")
+            print("---------------------------------\n")
+
+            if not self._validate_analysis(analysis):
                 return
+            
+            if not analysis.generation_order:
+                logging.info("AI analysis resulted in no files to change. Exiting.")
+                return
+
+            # C. User Confirmation
+            if not self.args.force:
+                prompt_message = "Accept this plan and proceed with generation? (y/n) or provide feedback to refine the plan: "
+                user_input = input(prompt_message).lower()
+
+                if user_input == 'y':
+                    logging.info("✅ Plan approved by user. Proceeding with code generation.")
+                    break  # Exit feedback loop and proceed
+                elif user_input == 'n':
+                    logging.info("Operation cancelled by user.")
+                    return
+                else:
+                    user_feedback = user_input
+                    previous_analysis = analysis
+                    # Continue to the next iteration of the while loop to re-analyze
+            else:
+                logging.info("✅ Plan approved automatically (--force).")
+                break  # Exit feedback loop
 
         # 5. Iterative Generation
         unprocessed_files = self._execute_generation_loop(analysis, all_repo_files, app_desc_content)
