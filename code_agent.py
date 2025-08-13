@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import queue
+import re
 import subprocess
 import threading
 import time
@@ -429,8 +430,12 @@ class CliManager:
             self._log_error("'git' command not found. Is Git installed and in your PATH?")
             return False
 
-    def _commit_and_push_changes(self, branch_name: str, commit_message: str) -> bool:
-        """Adds all changes, commits them, and pushes the branch to origin."""
+    def _commit_and_push_changes(self, branch_name: str, commit_message: str) -> Optional[str]:
+        """
+        Adds all changes, commits them, and pushes the branch to origin.
+        Returns the pull request URL if found in the output, or an empty string if push was successful but no URL was found.
+        Returns None if the push operation fails.
+        """
         try:
             self._log_info("Staging changes...", icon="💾")
             subprocess.run(["git", "add", "."], cwd=self.args.dir, check=True)
@@ -439,19 +444,43 @@ class CliManager:
             subprocess.run(["git", "commit", "-m", commit_message], cwd=self.args.dir, check=True)
 
             self._log_info(f"Pushing branch '{branch_name}' to origin...", icon="🚀")
-            subprocess.run(["git", "push", "-u", "origin", branch_name], cwd=self.args.dir, check=True)
+            push_result = subprocess.run(
+                ["git", "push", "-u", "origin", branch_name],
+                cwd=self.args.dir,
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+
+            # Log the full output for the user, as it's useful.
+            full_output = (push_result.stdout or "") + "\n" + (push_result.stderr or "")
+            self._log_info(f"Git push output:\n{full_output.strip()}")
+
+            # Try to find the PR URL in the output (usually in stderr)
+            url_pattern = re.compile(r'https?://[^\s]+')
+            if push_result.stderr:
+                for line in push_result.stderr.split('\n'):
+                    if 'remote:' in line and ('pull/new' in line or 'pull-request' in line):
+                        match = url_pattern.search(line)
+                        if match:
+                            url = match.group(0)
+                            self._log_info(f"Found pull request creation link: {url}", icon="🔗")
+                            return url
             
             self._log_info("Changes committed and pushed successfully.", icon="✅")
-            return True
+            return "" # Push successful, but no URL found.
         except subprocess.CalledProcessError as e:
             self._log_error(f"Git operation failed: {e.stderr}")
-            return False
+            if e.stdout:
+                self._log_error(f"Git stdout: {e.stdout}")
+            return None # Push failed
         except FileNotFoundError:
             self._log_error("'git' command not found.")
-            return False
+            return None # Push failed
 
     def _create_pull_request(self, branch_name: str, title: str, body: str) -> bool:
-        """Creates a pull request using the GitHub CLI 'gh'."""
+        """Creates a pull request using the GitHub CLI 'gh' and opens it in the browser."""
         try:
             subprocess.run(["gh", "--version"], check=True, capture_output=True, text=True)
         except (FileNotFoundError, subprocess.CalledProcessError):
@@ -479,18 +508,25 @@ class CliManager:
             )
             pr_url = result.stdout.strip()
             self._log_info(f"Successfully created pull request: {pr_url}", icon="✅")
+            self._log_info("Opening pull request in your browser...", icon="🌐")
+            webbrowser.open(pr_url)
             return True
         except subprocess.CalledProcessError as e:
             if "a pull request for" in e.stderr and "already exists" in e.stderr:
                 self._log_warning(f"A pull request for branch '{branch_name}' already exists.")
                 try:
-                    pr_list_cmd = ["gh", "pr", "list", "--head", branch_name, "--json", "url"]
+                    # Check for an existing open PR
+                    pr_list_cmd = ["gh", "pr", "list", "--head", branch_name, "--json", "url", "--state", "open"]
                     pr_list_result = subprocess.run(pr_list_cmd, cwd=self.args.dir, capture_output=True, text=True, check=True)
                     pr_info = json.loads(pr_list_result.stdout)
                     if pr_info:
-                        self._log_info(f"Existing PR URL: {pr_info[0]['url']}")
+                        pr_url = pr_info[0]['url']
+                        self._log_info(f"Opening existing PR: {pr_url}", icon="🌐")
+                        webbrowser.open(pr_url)
+                    else:
+                        self._log_warning("Could not find an open PR for this branch to open.")
                 except Exception as find_e:
-                    self._log_warning(f"Could not retrieve existing PR URL: {find_e}")
+                    self._log_warning(f"Could not retrieve or open existing PR URL: {find_e}")
                 return True
             
             self._log_error(f"Failed to create pull request: {e.stderr}")
@@ -596,7 +632,7 @@ class CliManager:
         # 2. Start Web Server and open browser
         server = None
         if not self.args.force:
-            viewer_html_path = create_code_agent_html_viewer(self.args.port)
+            viewer_html_path = create_code_agent_html_viewer(self.args.port, all_repo_files)
             if not viewer_html_path:
                 self._log_error("Failed to create the HTML viewer file.")
                 return
@@ -695,11 +731,20 @@ class CliManager:
 
                     if decision == 'approve':
                         self._log_info("Plan approved by user. Proceeding with code generation.", icon="✅")
-                        if data and isinstance(data, dict) and 'use_flash_model' in data:
-                            override_value: bool = bool(data.get('use_flash_model', False))
-                            if analysis.use_flash_model != override_value:
-                                analysis.use_flash_model = override_value
-                                self._log_info(f"Model selection overridden by user. 'Use Gemini Flash' is now set to: {analysis.use_flash_model}")
+                        if data and isinstance(data, dict):
+                            # Handle model override
+                            if 'use_flash_model' in data:
+                                override_value: bool = bool(data.get('use_flash_model', False))
+                                if analysis.use_flash_model != override_value:
+                                    analysis.use_flash_model = override_value
+                                    self._log_info(f"Model selection overridden by user. 'Use Gemini Flash' is now set to: {analysis.use_flash_model}")
+                            
+                            # Handle additional context files
+                            additional_files = data.get('additional_context_files', [])
+                            if additional_files:
+                                self._log_info(f"User added {len(additional_files)} files to context: {additional_files}")
+                                # Add to relevant_files, avoiding duplicates
+                                analysis.relevant_files = sorted(list(set(analysis.relevant_files + additional_files)))
                         
                         if not self._create_and_checkout_branch(analysis.branch_name):
                             self.status_queue.put({"status": "error", "message": "Could not create git branch."})
@@ -710,7 +755,21 @@ class CliManager:
                         self._log_info("Plan rejected by user. Operation cancelled.", icon="❌")
                         return
                     elif decision == 'feedback':
-                        user_feedback = data
+                        if data and isinstance(data, dict):
+                            user_feedback = data.get('feedback')
+                            additional_files = data.get('additional_context_files', [])
+                            if additional_files:
+                                self._log_info(f"User added {len(additional_files)} files to context for re-analysis: {additional_files}")
+                                analysis.relevant_files = sorted(list(set(analysis.relevant_files + additional_files)))
+                        else:
+                            # Fallback for older JS or unexpected data format
+                            user_feedback = data if isinstance(data, str) else None
+
+                        if not user_feedback:
+                            self._log_warning("Feedback submitted without text. Ignoring and awaiting new decision.")
+                            server.reset_decision()
+                            continue
+                        
                         previous_analysis = analysis
                         feedback_loop += 1
                         # The get_initial_analysis call will log the re-analysis message.
@@ -737,12 +796,19 @@ class CliManager:
             if not unprocessed_files:
                 self._log_info("All files processed. Proceeding with git operations.")
                 commit_message = f"feat: {self.args.task}\n\n{analysis.reasoning}"
-                if self._commit_and_push_changes(analysis.branch_name, commit_message):
+                push_result_url = self._commit_and_push_changes(analysis.branch_name, commit_message)
+                if push_result_url is not None:  # This means push was successful
+                    webbrowser.open(push_result_url)
                     pr_title = f"AI-Gen: {analysis.branch_name}"
                     pr_body = f"This PR was automatically generated by an AI agent to address the following task:\n\n**Task:** {self.args.task}\n\n**AI's Plan:**\n"
                     for i, step in enumerate(analysis.plan):
                         pr_body += f"{i+1}. {step}\n"
+                    # Try to create PR with gh first. _create_pull_request returns True on success.
                     self._create_pull_request(analysis.branch_name, pr_title, pr_body)
+                else:
+                    # This block is executed if push_result_url is None, which means push failed.
+                    self._log_warning("Git push failed. Skipping PR creation.")
+
             else:
                 self._log_warning("Some files were not processed. Skipping git commit and PR creation.")
 
