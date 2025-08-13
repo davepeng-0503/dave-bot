@@ -419,6 +419,9 @@ def create_code_plan_html(analysis: "CodeAnalysis", task: str, port: int) -> Opt
         const mainContent = document.getElementById('main-content');
         const totalFiles = {len(analysis.generation_order) if analysis.generation_order else 0};
         let completedFiles = 0;
+        let progressUpdater = null; // To hold our setInterval ID
+        let currentFileStartTime = null;
+        const estimatedTimePerFile = 180; // 3 minutes in seconds
 
         function escapeHtml(unsafe) {{
             if (typeof unsafe !== 'string') {{
@@ -434,6 +437,29 @@ def create_code_plan_html(analysis: "CodeAnalysis", task: str, port: int) -> Opt
 
         function showMessage(title, message) {{
             mainContent.innerHTML = `<div class="container"><h1>${{title}}</h1><p>${{message}}</p></div>`;
+        }}
+
+        function updateProgressBar() {{
+            if (!currentFileStartTime) return;
+
+            const elapsedTime = (Date.now() - currentFileStartTime) / 1000;
+            
+            // Progress of the current file (from 0.0 to 1.0), capped at 1.0.
+            // This represents how much of the *time slot* for the current file has been used.
+            const currentFileTimeProgress = Math.min(1.0, elapsedTime / estimatedTimePerFile);
+
+            // Overall progress is based on completed files plus the progress of the current file's time slot.
+            const completedProgress = (completedFiles / totalFiles);
+            const currentProgress = (currentFileTimeProgress / totalFiles);
+            
+            // We cap the total at 99% until the very end, to leave room for the final "finished" state.
+            const totalPercentage = Math.min(99, Math.floor((completedProgress + currentProgress) * 100));
+
+            const progressBar = document.getElementById('generation-progress-bar');
+            if (progressBar) {{
+                progressBar.style.width = `${{totalPercentage}}%`;
+                progressBar.textContent = `${{totalPercentage}}% Complete`;
+            }}
         }}
 
         function pollStatus() {{
@@ -457,6 +483,13 @@ def create_code_plan_html(analysis: "CodeAnalysis", task: str, port: int) -> Opt
                     }}
 
                     if (data.status === 'writing') {{
+                        // Stop any previous timer just in case.
+                        if (progressUpdater) clearInterval(progressUpdater);
+
+                        // Record start time and start the new timer.
+                        currentFileStartTime = Date.now();
+                        progressUpdater = setInterval(updateProgressBar, 1000);
+
                         const writingElement = document.createElement('p');
                         const elementId = `writing-${{data.file_path.replace(/[^a-zA-Z0-9]/g, '-')}}`;
                         writingElement.id = elementId;
@@ -464,7 +497,17 @@ def create_code_plan_html(analysis: "CodeAnalysis", task: str, port: int) -> Opt
                         logContainer.appendChild(writingElement);
 
                     }} else if (data.status === 'done') {{
+                        // Stop the timer for the completed file.
+                        if (progressUpdater) {{
+                            clearInterval(progressUpdater);
+                            progressUpdater = null;
+                        }}
+                        currentFileStartTime = null;
+
                         completedFiles++;
+                        
+                        // Set the progress bar to the solid new base.
+                        // This handles the "speed up" case where a file finishes early.
                         const percentage = totalFiles > 0 ? Math.round((completedFiles / totalFiles) * 100) : 0;
                         const progressBar = document.getElementById('generation-progress-bar');
                         if (progressBar) {{
@@ -491,6 +534,13 @@ def create_code_plan_html(analysis: "CodeAnalysis", task: str, port: int) -> Opt
                         logContainer.appendChild(doneElement);
 
                     }} else if (data.status === 'finished') {{
+                        // Stop any running timer.
+                        if (progressUpdater) {{
+                            clearInterval(progressUpdater);
+                            progressUpdater = null;
+                        }}
+                        currentFileStartTime = null;
+
                         const progressBar = document.getElementById('generation-progress-bar');
                         if (progressBar) {{
                             progressBar.style.width = '100%';
@@ -506,6 +556,7 @@ def create_code_plan_html(analysis: "CodeAnalysis", task: str, port: int) -> Opt
                     setTimeout(pollStatus, 500);
                 }})
                 .catch(err => {{
+                    if (progressUpdater) clearInterval(progressUpdater); // Stop timer on error
                     const logContainer = document.getElementById('generation-log');
                     if (logContainer) {{
                         logContainer.innerHTML += `<p style="color: var(--danger-color);">Connection to server lost. Please check the agent's console output.</p>`;

@@ -1,4 +1,4 @@
-"""#!/usr/bin/env python
+#!/usr/bin/env python
 import argparse
 import json
 import logging
@@ -128,7 +128,7 @@ You are an expert software developer planning a coding task. Your goal is to cre
 3.  **Identify Files**: Determine `files_to_edit`, `files_to_create`, and `relevant_files` for context.
 4.  **Verify with Tools**: Use `git_grep_search_tool` and `read_file_tool` to confirm your file choices and understand the code. You can call these tools multiple times within a single turn.
 5.  **Assess Confidence**: After your initial analysis and tool use, assess your confidence.
-    - **If Confidence < 90%**: If you feel you're missing information or your plan is too speculative, populate `additional_grep_queries_needed` with new search terms that would help you build a better plan. If you do this, do not populate the other fields in the `CodeAnalysis` object.
+    - **If Confidence < 90%**: If you feel you are missing information or your plan is too speculative, populate `additional_grep_queries_needed` with new search terms that would help you build a better plan. If you do this, do not populate the other fields in the `CodeAnalysis` object.
     - **If Confidence >= 90%**: If you are confident, leave `additional_grep_queries_needed` empty and provide the full `CodeAnalysis`, including the `branch_name`, `plan`, file lists, and `generation_order`.
 
 **CRITICAL**:
@@ -718,4 +718,3 @@ if __name__ == "__main__":
 
     cli = CliManager()
     cli.run()
-"
