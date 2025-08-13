@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import subprocess
+import webbrowser
 from typing import Callable, Dict, List, Optional, Set
 
 from pydantic import BaseModel, Field
@@ -350,6 +351,121 @@ class CliManager:
             return False
         return True
 
+    def _format_files_to_create_html(self, files_to_create: List[NewFile]) -> str:
+        """Formats the list of files to create into an HTML table."""
+        if not files_to_create:
+            return "<p>None</p>"
+        
+        table_rows = ""
+        for file in files_to_create:
+            suggestions_html = "<ul>" + "".join([f"<li><code>{sug}</code></li>" for sug in file.content_suggestions]) + "</ul>" if file.content_suggestions else "None"
+            table_rows += f"""
+            <tr>
+                <td><code>{file.file_path}</code></td>
+                <td>{file.reasoning}</td>
+                <td>{suggestions_html}</td>
+            </tr>
+            """
+
+        return f"""
+        <table>
+            <thead>
+                <tr>
+                    <th>File Path</th>
+                    <th>Reasoning</th>
+                    <th>Content Suggestions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {table_rows}
+            </tbody>
+        </table>
+        """
+
+    def _create_and_open_plan_html(self, analysis: CodeAnalysis):
+        """Generates an HTML report from the analysis and opens it."""
+        if not analysis:
+            return
+
+        html_content = f"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Code Generation Plan</title>
+    <style>
+        body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; padding: 20px; max-width: 1000px; margin: auto; background-color: #f7f9fc; color: #333; }}
+        h1, h2, h3 {{ color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 10px; }}
+        h1 {{ text-align: center; font-size: 2.5em; color: #1a2533; }}
+        .container {{ background-color: #fff; border: 1px solid #ddd; padding: 25px; margin-bottom: 20px; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.05); }}
+        ul, ol {{ padding-left: 25px; }}
+        li {{ margin-bottom: 12px; }}
+        code {{ background-color: #ecf0f1; padding: 3px 6px; border-radius: 4px; font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; font-size: 0.95em; color: #c0392b; }}
+        table {{ width: 100%; border-collapse: collapse; margin-top: 20px; }}
+        th, td {{ border: 1px solid #ddd; padding: 12px; text-align: left; vertical-align: top; }}
+        th {{ background-color: #3498db; color: white; font-weight: bold; }}
+        tr:nth-child(even) {{ background-color: #f2f2f2; }}
+        .task p, .reasoning p {{ white-space: pre-wrap; }}
+    </style>
+</head>
+<body>
+    <h1>🤖 AI Code Generation Plan 🤖</h1>
+
+    <div class="container">
+        <h2>Task</h2>
+        <div class="task"><p>{self.args.task}</p></div>
+    </div>
+
+    <div class="container">
+        <h2>High-level Plan</h2>
+        <ol>
+            {''.join([f'<li>{step}</li>' for step in analysis.plan]) if analysis.plan else "<li>No plan provided.</li>"}
+        </ol>
+    </div>
+
+    <div class="container">
+        <h2>Overall Reasoning</h2>
+        <div class="reasoning"><p>{analysis.reasoning or "No reasoning provided."}</p></div>
+    </div>
+
+    <div class="container">
+        <h2>File Breakdown</h2>
+
+        <h3>Relevant Files for Context</h3>
+        <ul>
+            {''.join([f'<li><code>{file}</code></li>' for file in analysis.relevant_files]) if analysis.relevant_files else "<li>None</li>"}
+        </ul>
+
+        <h3>Files to Edit</h3>
+        <ul>
+            {''.join([f'<li><code>{file}</code></li>' for file in analysis.files_to_edit]) if analysis.files_to_edit else "<li>None</li>"}
+        </ul>
+
+        <h3>Files to Create</h3>
+        {self._format_files_to_create_html(analysis.files_to_create)}
+    </div>
+    
+    <div class="container">
+        <h2>Proposed Generation Order</h2>
+        <ol>
+            {''.join([f'<li><code>{file}</code></li>' for file in analysis.generation_order]) if analysis.generation_order else "<li>None</li>"}
+        </ol>
+    </div>
+
+</body>
+</html>
+        """
+
+        plan_file_path = os.path.join(self.args.dir, "plan.html")
+        try:
+            with open(plan_file_path, "w", encoding="utf-8") as f:
+                f.write(html_content)
+            logging.info(f"✅ Plan saved to {plan_file_path}")
+            webbrowser.open(f"file://{os.path.realpath(plan_file_path)}")
+        except Exception as e:
+            logging.error(f"❌ Could not write or open the HTML plan: {e}")
+
     def _execute_generation_loop(self, analysis: CodeAnalysis, all_repo_files: List[str], app_desc_content: str) -> List[str]:
         """
         Manages the iterative process of generating code, handling context, and re-analyzing on failure.
@@ -491,22 +607,9 @@ class CliManager:
                     logging.error(f"❌ Failed to get a confident analysis from the AI after {MAX_ANALYSIS_GREP_RETRIES} attempts.")
                     return
 
-            # B. Display Analysis
-            print("\n--- 🤖 AI Code Analysis Result ---")
-            print(f"Task: {self.args.task}\n")
-            print("High-level Plan:")
-            if analysis.plan:
-                for i, step in enumerate(analysis.plan, 1):
-                    print(f"  {i}. {step}")
-            else:
-                print("  No plan provided.")
-            
-            print(f"\nOverall Reasoning:\n {analysis.reasoning}\n")
-            print("Relevant Files for Context:", analysis.relevant_files or "None")
-            print("Files to Edit:", analysis.files_to_edit or "None")
-            print("Files to Create:", [f.file_path for f in analysis.files_to_create] or "None")
-            print("Proposed Generation Order:", analysis.generation_order or "None")
-            print("---------------------------------\n")
+            # B. Display Analysis and get confirmation
+            logging.info("✅ Analysis complete. Opening plan in web browser for review.")
+            self._create_and_open_plan_html(analysis)
 
             if not self._validate_analysis(analysis):
                 return
@@ -517,7 +620,7 @@ class CliManager:
 
             # C. User Confirmation
             if not self.args.force:
-                prompt_message = "Accept this plan and proceed with generation? (y/n) or provide feedback to refine the plan: "
+                prompt_message = "A plan has been generated and opened in your browser. Accept this plan and proceed with generation? (y/n) or provide feedback to refine the plan: "
                 user_input = input(prompt_message).lower()
 
                 if user_input == 'y':
