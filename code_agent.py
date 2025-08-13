@@ -589,5 +589,9 @@ class CliManager:
 
 
 if __name__ == "__main__":
+    if os.name == "nt":
+        import asyncio
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
     cli = CliManager()
     cli.run()
