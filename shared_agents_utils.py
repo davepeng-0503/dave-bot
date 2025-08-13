@@ -4,13 +4,18 @@ Utilities shared across different AI agents, including file operations,
 base AI agent configuration, and context management.
 """
 import hashlib
+import http.server
+import json
 import logging
 import os
+import socketserver
 import subprocess
-from typing import Callable, Dict, List, Optional
+import threading
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
 from google.genai.types import HarmBlockThreshold, HarmCategory, SafetySettingDict
+from pydantic import BaseModel, Field
 from pydantic_ai import Agent
 from pydantic_ai.models.google import GoogleModel, GoogleModelSettings
 from pydantic_ai.providers.google import GoogleProvider
@@ -139,8 +144,47 @@ def read_file_for_agent_tool(directory: str, file_path: str) -> str:
     if content is None:
         # read_file_content already logs the specific error
         return f"Error: Could not read file '{file_path}'. It might not exist or there was a reading error."
-    
+
     return f"--- Content of {file_path} ---\n{content}"
+
+
+# --- Agent Tool Models and Functions ---
+
+class GitGrepSearchInput(BaseModel):
+    """Input model for the git grep search tool."""
+    query: str = Field(description="The keyword or regex pattern to search for within the git repository.")
+
+class ReadFileContentInput(BaseModel):
+    """Input model for the read file content tool."""
+    file_path: str = Field(description="The path of the file to read.")
+
+def git_grep_search(directory: str, query: str) -> str:
+    """
+    Performs a case-insensitive 'git grep' search in the codebase.
+    This function is intended to be used as a tool by AI agents.
+    """
+    logging.info(f"🛠️ Running git grep search for: '{query}' in '{directory}'")
+    try:
+        result = subprocess.run(
+            ['git', 'grep', '-i', '-n', query],
+            cwd=directory,
+            capture_output=True,
+            text=True,
+            check=False
+        )
+        if result.returncode == 0:
+            return f"Git grep results for '{query}':\n{result.stdout}"
+        elif result.returncode == 1:
+            return f"No results found for '{query}'."
+        else:
+            logging.error(f"Error during git grep: {result.stderr}")
+            return f"Error executing git grep: {result.stderr}"
+    except FileNotFoundError:
+        logging.error("❌ 'git' command not found. Is Git installed?")
+        return "Error: 'git' command not found. Cannot perform search."
+    except Exception as e:
+        logging.error(f"An unexpected error occurred during git grep: {e}")
+        return f"An unexpected error occurred: {e}"
 
 
 # --- Base AI Agent ---
@@ -151,6 +195,7 @@ class BaseAiAgent:
     A base class for AI agents, handling API key loading, model configuration,
     and common AI-related tasks like summarization.
     """
+
     summarizer_agent: Agent
     api_key: str
     summaries_cache: Dict[str, str]
@@ -232,7 +277,9 @@ Mention any important logic or side effects. The summary should be concise and i
             logging.info(f"📝 Reusing cached summary for {file_path}")
             return self.summaries_cache[content_hash]
 
-        prompt = f"Please summarize the following code from the file `{file_path}`:\n\n{code_content}"
+        prompt = (
+            f"Please summarize the following code from the file `{file_path}`:\n\n{code_content}"
+        )
 
         logging.info(f"📝 Summarizing code in {file_path}...")
         summary = self.summarizer_agent.run_sync(
@@ -304,3 +351,150 @@ def build_context_from_dict(
             context_parts.append(f"--- Content of {file_path} ---\n{content}\n")
 
     return "\n".join(context_parts)
+
+
+# --- Web Server for User Approval ---
+
+
+class ApprovalWebServer(socketserver.TCPServer):
+    """A simple web server to get user approval for a plan."""
+
+    allow_reuse_address = True
+
+    def __init__(self, server_address: Tuple[str, int], RequestHandlerClass, html_file_path: str):
+        super().__init__(server_address, RequestHandlerClass)
+        self.html_file_path = html_file_path
+        self.decision_made = threading.Event()
+        self.user_decision: Optional[str] = None
+        self.user_data: Optional[str] = None
+
+    def set_decision(self, decision: str, data: Optional[str] = None):
+        """Called by the handler to record the user's decision."""
+        if not self.decision_made.is_set():
+            self.user_decision = decision
+            self.user_data = data
+            self.decision_made.set()
+
+    def wait_for_decision(self) -> Tuple[Optional[str], Optional[str]]:
+        """Blocks until a decision is made and returns it."""
+        self.decision_made.wait()
+        return self.user_decision, self.user_data
+
+
+class ApprovalHandler(http.server.BaseHTTPRequestHandler):
+    """A simple HTTP request handler for the approval server."""
+    server: ApprovalWebServer # type: ignore
+
+    def _send_response(self, code: int, content_type: str, body: bytes):
+        self.send_response(code)
+        self.send_header("Content-type", content_type)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_OPTIONS(self):
+        """Handle pre-flight requests for CORS."""
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+
+    def do_GET(self):
+        """Handles GET requests."""
+        if self.path == "/":
+            try:
+                with open(self.server.html_file_path, "rb") as f:
+                    self._send_response(200, "text/html", f.read())
+            except FileNotFoundError:
+                error_body = (
+                    b"<html><body><h1>Error 404</h1><p>HTML file not found.</p></body></html>"
+                )
+                self._send_response(404, "text/html", error_body)
+        else:
+            error_body = b"<html><body><h1>Error 404</h1><p>Not Found.</p></body></html>"
+            self._send_response(404, "text/html", error_body)
+
+    def do_POST(self):
+        """Handles POST requests for user actions."""
+        if self.path in ["/approve", "/reject", "/feedback"]:
+            content_length = int(self.headers.get("Content-Length", 0))
+            post_data = self.rfile.read(content_length)
+
+            action = self.path.lstrip("/")
+            data = None
+
+            if action == "feedback":
+                try:
+                    payload = json.loads(post_data)
+                    data = payload.get("feedback", "")
+                except json.JSONDecodeError:
+                    self._send_response(400, "text/plain", b"Invalid JSON")
+                    return
+
+            self.server.set_decision(action, data)
+
+            success_message = (
+                f"Decision '{action}' received. You can close this window."
+            )
+            self._send_response(
+                200,
+                "text/html",
+                f"<html><body><p>{success_message}</p><script>window.close();</script></body></html>".encode(
+                    "utf-8"
+                ),
+            )
+        else:
+            self._send_response(404, "text/plain", b"Not Found")
+
+    def log_message(self, format: str, *args: Any) -> None:
+        """Suppress logging to keep the console clean."""
+        return
+
+
+def wait_for_user_approval_from_browser(
+    html_file_path: str, port: int
+) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Starts a local web server to display an HTML file and waits for user interaction.
+
+    The server hosts the provided HTML file and listens for POST requests to:
+    - /approve: User approves the plan.
+    - /reject: User rejects the plan.
+    - /feedback: User submits feedback text.
+
+    Args:
+        html_file_path: The absolute path to the HTML file to serve.
+        port: The port on which to run the server.
+
+    Returns:
+        A tuple containing the action (e.g., 'approve', 'reject', 'feedback')
+        and optional data (the feedback text).
+    """
+    server = None
+    # We need to bind the html_file_path to the handler.
+    # functools.partial is a good way to do this.
+    # handler = functools.partial(ApprovalHandler, html_file_path=html_file_path)
+    
+    def handler(*args, **kwargs):
+        return ApprovalHandler(*args, **kwargs)
+
+    try:
+        server = ApprovalWebServer(("", port), handler, html_file_path=html_file_path)
+        logging.info(f"Starting temporary web server on http://localhost:{port}")
+
+        server_thread = threading.Thread(target=server.serve_forever)
+        server_thread.daemon = True
+        server_thread.start()
+
+        decision, data = server.wait_for_decision()
+        logging.info(f"User decision received: {decision}")
+        return decision, data
+
+    finally:
+        if server:
+            logging.info("Shutting down web server.")
+            server.shutdown()
+            server.server_close()

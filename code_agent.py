@@ -17,12 +17,14 @@ from shared_agents_utils import (
     get_git_files,
     read_file_content,
     read_file_for_agent_tool,
+    wait_for_user_approval_from_browser,
     write_file_content,
 )
 
 # --- Configuration ---
 MAX_REANALYSIS_RETRIES = 3
 MAX_ANALYSIS_GREP_RETRIES = 3
+DEFAULT_SERVER_PORT = 8080
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -248,6 +250,212 @@ Original content of `{file_path}`:
 class CliManager:
     """Manages CLI interactions, file I/O, and orchestrates the analysis and code generation."""
 
+    _COMMON_STYLE = """
+<style>
+    :root {
+        --primary-color: #4a90e2;
+        --secondary-color: #50e3c2;
+        --background-color: #f4f7f9;
+        --container-bg-color: #ffffff;
+        --text-color: #333;
+        --heading-color: #1a2533;
+        --border-color: #e0e6ed;
+        --code-bg-color: #2d2d2d;
+        --code-text-color: #f8f8f2;
+        --inline-code-bg: #eef2f5;
+        --inline-code-text: #d6336c;
+        --success-color: #2ecc71;
+        --danger-color: #e74c3c;
+        --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
+    }
+
+    body {
+        font-family: var(--font-family);
+        line-height: 1.7;
+        padding: 2rem;
+        background-color: var(--background-color);
+        color: var(--text-color);
+        margin: 0;
+    }
+
+    .main-container {
+        max-width: 1100px;
+        margin: auto;
+    }
+
+    h1, h2, h3 {
+        color: var(--heading-color);
+        font-weight: 700;
+        margin-top: 2rem;
+        margin-bottom: 1rem;
+    }
+
+    h1 {
+        text-align: center;
+        font-size: 2.8em;
+        margin-bottom: 2rem;
+        background: linear-gradient(45deg, var(--primary-color), var(--secondary-color));
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+    }
+
+    h2 {
+        font-size: 1.8em;
+        border-bottom: 3px solid var(--primary-color);
+        padding-bottom: 0.5rem;
+    }
+
+    .container {
+        background-color: var(--container-bg-color);
+        border: 1px solid var(--border-color);
+        padding: 2rem;
+        margin-bottom: 1.5rem;
+        border-radius: 12px;
+        box-shadow: 0 8px 24px rgba(26, 37, 51, 0.07);
+        transition: transform 0.2s ease-in-out, box-shadow 0.2s ease-in-out;
+    }
+
+    .container:hover {
+        transform: translateY(-3px);
+        box-shadow: 0 12px 32px rgba(26, 37, 51, 0.1);
+    }
+
+    ul, ol {
+        padding-left: 2rem;
+    }
+
+    li {
+        margin-bottom: 0.75rem;
+    }
+
+    code {
+        background-color: var(--inline-code-bg);
+        color: var(--inline-code-text);
+        padding: 0.2em 0.4em;
+        margin: 0;
+        font-size: 85%;
+        border-radius: 6px;
+        font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    }
+
+    pre {
+        background-color: var(--code-bg-color);
+        color: var(--code-text-color);
+        padding: 1.5rem;
+        border-radius: 8px;
+        overflow-x: auto;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+    }
+
+    pre code {
+        background-color: transparent;
+        color: inherit;
+        padding: 0;
+        margin: 0;
+        font-size: inherit;
+        border-radius: 0;
+    }
+
+    blockquote {
+        border-left: 5px solid var(--primary-color);
+        padding-left: 1.5rem;
+        color: #555;
+        margin-left: 0;
+        font-style: italic;
+    }
+
+    table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 1.5rem;
+        box-shadow: 0 4px 8px rgba(0,0,0,0.05);
+        border-radius: 8px;
+        overflow: hidden;
+    }
+
+    th, td {
+        border: 1px solid var(--border-color);
+        padding: 0.8rem 1rem;
+        text-align: left;
+    }
+
+    th {
+        background-color: var(--primary-color);
+        color: white;
+        font-weight: 500;
+    }
+
+    tr:nth-child(even) {
+        background-color: #f9fafb;
+    }
+
+    .actions {
+        text-align: center;
+        margin-top: 2rem;
+        padding-top: 2rem;
+        border-top: 1px solid var(--border-color);
+    }
+
+    .actions button {
+        color: white;
+        border: none;
+        padding: 1rem 2rem;
+        font-size: 1rem;
+        font-weight: 500;
+        border-radius: 8px;
+        cursor: pointer;
+        margin: 0.5rem;
+        transition: all 0.3s ease;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+
+    .actions button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 6px 16px rgba(0,0,0,0.15);
+    }
+
+    .approve-btn { background-color: var(--primary-color); }
+    .approve-btn:hover { background-color: #3a82d2; }
+
+    .reject-btn { background-color: var(--danger-color); }
+    .reject-btn:hover { background-color: #c0392b; }
+
+    .feedback-btn { background-color: var(--success-color); }
+    .feedback-btn:hover { background-color: #27ae60; }
+
+    .feedback-form {
+        margin-top: 2rem;
+        background-color: #fdfdfe;
+        padding: 1.5rem;
+        border-radius: 8px;
+        border: 1px solid var(--border-color);
+        text-align: left;
+    }
+
+    .feedback-form h3 {
+        margin-top: 0;
+        color: var(--heading-color);
+        font-size: 1.2em;
+    }
+
+    .feedback-form textarea {
+        width: calc(100% - 2rem);
+        min-height: 100px;
+        padding: 1rem;
+        border-radius: 8px;
+        border: 1px solid var(--border-color);
+        margin-bottom: 1rem;
+        font-family: var(--font-family);
+        font-size: 1rem;
+        resize: vertical;
+    }
+</style>
+"""
+
     def __init__(self):
         """Initializes the CLI manager and the AI code agent."""
         self.ai_agent = AiCodeAgent()
@@ -277,6 +485,10 @@ class CliManager:
         )
         parser.add_argument(
             '--no-strict', dest='strict', action='store_false', help="Allow AI to make broader improvements."
+        )
+        parser.add_argument(
+            "--port", type=int, default=DEFAULT_SERVER_PORT,
+            help=f"The port to run the local web server on for user approval (default: {DEFAULT_SERVER_PORT})."
         )
         parser.set_defaults(strict=True)
         return parser.parse_args()
@@ -382,10 +594,10 @@ class CliManager:
         </table>
         """
 
-    def _create_and_open_plan_html(self, analysis: CodeAnalysis):
-        """Generates an HTML report from the analysis and opens it."""
+    def _create_and_open_plan_html(self, analysis: CodeAnalysis) -> str:
+        """Generates an HTML report for the analysis and returns the file path."""
         if not analysis:
-            return
+            return ""
 
         html_content = f"""
 <!DOCTYPE html>
@@ -394,65 +606,111 @@ class CliManager:
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AI Code Generation Plan</title>
-    <style>
-        body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; padding: 20px; max-width: 1000px; margin: auto; background-color: #f7f9fc; color: #333; }}
-        h1, h2, h3 {{ color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 10px; }}
-        h1 {{ text-align: center; font-size: 2.5em; color: #1a2533; }}
-        .container {{ background-color: #fff; border: 1px solid #ddd; padding: 25px; margin-bottom: 20px; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.05); }}
-        ul, ol {{ padding-left: 25px; }}
-        li {{ margin-bottom: 12px; }}
-        code {{ background-color: #ecf0f1; padding: 3px 6px; border-radius: 4px; font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; font-size: 0.95em; color: #c0392b; }}
-        table {{ width: 100%; border-collapse: collapse; margin-top: 20px; }}
-        th, td {{ border: 1px solid #ddd; padding: 12px; text-align: left; vertical-align: top; }}
-        th {{ background-color: #3498db; color: white; font-weight: bold; }}
-        tr:nth-child(even) {{ background-color: #f2f2f2; }}
-        .task p, .reasoning p {{ white-space: pre-wrap; }}
-    </style>
+    {self._COMMON_STYLE}
 </head>
 <body>
-    <h1>🤖 AI Code Generation Plan 🤖</h1>
+    <div id="main-content" class="main-container">
+        <h1>🤖 AI Code Generation Plan</h1>
 
-    <div class="container">
-        <h2>Task</h2>
-        <div class="task"><p>{self.args.task}</p></div>
+        <div class="container">
+            <h2>Task</h2>
+            <p>{self.args.task}</p>
+        </div>
+
+        <div class="container">
+            <h2>High-level Plan</h2>
+            <ol>
+                {''.join([f'<li>{step}</li>' for step in analysis.plan]) if analysis.plan else "<li>No plan provided.</li>"}
+            </ol>
+        </div>
+
+        <div class="container">
+            <h2>Overall Reasoning</h2>
+            <p>{analysis.reasoning or "No reasoning provided."}</p>
+        </div>
+
+        <div class="container">
+            <h2>File Breakdown</h2>
+
+            <h3>Relevant Files for Context</h3>
+            <ul>
+                {''.join([f'<li><code>{file}</code></li>' for file in analysis.relevant_files]) if analysis.relevant_files else "<li>None</li>"}
+            </ul>
+
+            <h3>Files to Edit</h3>
+            <ul>
+                {''.join([f'<li><code>{file}</code></li>' for file in analysis.files_to_edit]) if analysis.files_to_edit else "<li>None</li>"}
+            </ul>
+
+            <h3>Files to Create</h3>
+            {self._format_files_to_create_html(analysis.files_to_create)}
+        </div>
+        
+        <div class="container">
+            <h2>Proposed Generation Order</h2>
+            <ol>
+                {''.join([f'<li><code>{file}</code></li>' for file in analysis.generation_order]) if analysis.generation_order else "<li>None</li>"}
+            </ol>
+        </div>
+
+        <div class="container actions">
+            <h2>Confirm Plan</h2>
+            <p>Do you want to proceed with generating the code based on this plan?</p>
+            <button class="approve-btn" onclick="sendDecision('approve')">Approve & Generate Code</button>
+            <button class="reject-btn" onclick="sendDecision('reject')">Reject</button>
+            <div class="feedback-form">
+                <h3>Refine the Plan</h3>
+                <p>If the plan isn't quite right, provide feedback below and submit it for a new plan.</p>
+                <textarea id="feedback-text" placeholder="e.g., 'Please also create a new file for utility functions' or 'The plan seems to miss the point about Y'"></textarea>
+                <br>
+                <button class="feedback-btn" onclick="sendFeedback()">Submit Feedback</button>
+            </div>
+        </div>
     </div>
 
-    <div class="container">
-        <h2>High-level Plan</h2>
-        <ol>
-            {''.join([f'<li>{step}</li>' for step in analysis.plan]) if analysis.plan else "<li>No plan provided.</li>"}
-        </ol>
-    </div>
+    <script>
+        const port = {self.args.port};
+        const mainContent = document.getElementById('main-content');
 
-    <div class="container">
-        <h2>Overall Reasoning</h2>
-        <div class="reasoning"><p>{analysis.reasoning or "No reasoning provided."}</p></div>
-    </div>
+        function showMessage(title, message) {{
+            mainContent.innerHTML = `<div class="container"><h1>${{title}}</h1><p>${{message}}</p></div>`;
+        }}
 
-    <div class="container">
-        <h2>File Breakdown</h2>
+        function sendDecision(decision) {{
+            fetch(`http://localhost:${{port}}/${{decision}}`, {{ method: 'POST' }})
+                .then(response => response.text())
+                .then(text => {{
+                    showMessage(text, 'You can close this tab now. This window will close automatically in 2 seconds.');
+                    setTimeout(() => window.close(), 2000);
+                }})
+                .catch(err => {{
+                    showMessage('Error', 'Could not contact server. Please check the console.');
+                    console.error('Error sending decision:', err);
+                }});
+        }}
 
-        <h3>Relevant Files for Context</h3>
-        <ul>
-            {''.join([f'<li><code>{file}</code></li>' for file in analysis.relevant_files]) if analysis.relevant_files else "<li>None</li>"}
-        </ul>
-
-        <h3>Files to Edit</h3>
-        <ul>
-            {''.join([f'<li><code>{file}</code></li>' for file in analysis.files_to_edit]) if analysis.files_to_edit else "<li>None</li>"}
-        </ul>
-
-        <h3>Files to Create</h3>
-        {self._format_files_to_create_html(analysis.files_to_create)}
-    </div>
-    
-    <div class="container">
-        <h2>Proposed Generation Order</h2>
-        <ol>
-            {''.join([f'<li><code>{file}</code></li>' for file in analysis.generation_order]) if analysis.generation_order else "<li>None</li>"}
-        </ol>
-    </div>
-
+        function sendFeedback() {{
+            const feedback = document.getElementById('feedback-text').value;
+            if (!feedback) {{
+                alert('Please enter feedback before submitting.');
+                return;
+            }}
+            fetch(`http://localhost:${{port}}/feedback`, {{
+                method: 'POST',
+                headers: {{ 'Content-Type': 'application/json' }},
+                body: JSON.stringify({{ feedback: feedback }})
+            }})
+            .then(response => response.text())
+            .then(text => {{
+                showMessage(text, 'The agent is re-analyzing. You can close this tab now. This window will close automatically in 2 seconds.');
+                setTimeout(() => window.close(), 2000);
+            }})
+            .catch(err => {{
+                showMessage('Error', 'Could not contact server. Please check the console.');
+                console.error('Error sending feedback:', err);
+            }});
+        }}
+    </script>
 </body>
 </html>
         """
@@ -462,9 +720,10 @@ class CliManager:
             with open(plan_file_path, "w", encoding="utf-8") as f:
                 f.write(html_content)
             logging.info(f"✅ Plan saved to {plan_file_path}")
-            webbrowser.open(f"file://{os.path.realpath(plan_file_path)}")
+            return plan_file_path
         except Exception as e:
-            logging.error(f"❌ Could not write or open the HTML plan: {e}")
+            logging.error(f"❌ Could not write the HTML plan: {e}")
+            return ""
 
     def _execute_generation_loop(self, analysis: CodeAnalysis, all_repo_files: List[str], app_desc_content: str) -> List[str]:
         """
@@ -608,8 +867,10 @@ class CliManager:
                     return
 
             # B. Display Analysis and get confirmation
-            logging.info("✅ Analysis complete. Opening plan in web browser for review.")
-            self._create_and_open_plan_html(analysis)
+            logging.info("✅ Analysis complete. Awaiting user confirmation in browser.")
+            plan_html_path = self._create_and_open_plan_html(analysis)
+            if not plan_html_path:
+                return
 
             if not self._validate_analysis(analysis):
                 return
@@ -620,22 +881,26 @@ class CliManager:
 
             # C. User Confirmation
             if not self.args.force:
-                prompt_message = "A plan has been generated and opened in your browser. Accept this plan and proceed with generation? (y/n) or provide feedback to refine the plan: "
-                user_input = input(prompt_message).lower()
+                webbrowser.open(f"file://{os.path.realpath(plan_html_path)}")
+                decision, data = wait_for_user_approval_from_browser(os.path.realpath(plan_html_path), self.args.port)
 
-                if user_input == 'y':
+                if decision == 'approve':
                     logging.info("✅ Plan approved by user. Proceeding with code generation.")
-                    break  # Exit feedback loop and proceed
-                elif user_input == 'n':
-                    logging.info("Operation cancelled by user.")
+                    break
+                elif decision == 'reject':
+                    logging.info("❌ Plan rejected by user. Operation cancelled.")
                     return
-                else:
-                    user_feedback = user_input
+                elif decision == 'feedback':
+                    user_feedback = data
                     previous_analysis = analysis
-                    # Continue to the next iteration of the while loop to re-analyze
+                    logging.info(f"Re-running analysis with new feedback...")
+                    # continue loop
+                else:
+                    logging.error("No decision received from the browser. Exiting.")
+                    return
             else:
                 logging.info("✅ Plan approved automatically (--force).")
-                break  # Exit feedback loop
+                break
 
         # 5. Iterative Generation
         unprocessed_files = self._execute_generation_loop(analysis, all_repo_files, app_desc_content)

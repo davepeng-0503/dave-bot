@@ -18,10 +18,12 @@ from shared_agents_utils import (
     get_git_files,
     read_file_content,
     read_file_for_agent_tool,
+    wait_for_user_approval_from_browser,
 )
 
 # --- Configuration ---
 MAX_ANALYSIS_GREP_RETRIES = 3
+DEFAULT_SERVER_PORT = 8080
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -78,7 +80,7 @@ class Advice(BaseModel):
 class AiAdviseAgent(BaseAiAgent):
     """Handles all interactions with the Gemini AI model for giving advice."""
 
-    def get_advice_analysis(self, question: str, file_list: List[str], app_description: str = "", git_grep_search_tool: Optional[Callable] = None, read_file_tool: Optional[Callable] = None, grep_results: Optional[str] = None) -> AdviceAnalysis:
+    def get_advice_analysis(self, question: str, file_list: List[str], app_description: str = "", feedback: Optional[str] = None, previous_plan: Optional["AdviceAnalysis"] = None, git_grep_search_tool: Optional[Callable] = None, read_file_tool: Optional[Callable] = None, grep_results: Optional[str] = None) -> AdviceAnalysis:
         """Runs the agent to analyze the codebase for a given question."""
         
         system_prompt = f"""
@@ -103,6 +105,16 @@ Project Description:
 {app_description or "No description provided."}
 ---
 """
+        if feedback:
+            prompt_addition = "\n---\n"
+            prompt_addition += "IMPORTANT: This is a re-analysis. You must generate a new plan.\n"
+            if previous_plan:
+                prompt_addition += f"\nHere was the previous plan you created:\n{previous_plan.model_dump_json(indent=2)}\n"
+            
+            prompt_addition += f"\nThe feedback provided is: \"{feedback}\"\n"
+            prompt_addition += "\nPlease create a new, complete plan that addresses the feedback. You must provide a full plan this time and not ask for more grep queries.\n---"
+            system_prompt += prompt_addition
+
         prompt = f"""
 Full list of files in the repository:
 {json.dumps(file_list, indent=2)}
@@ -136,7 +148,9 @@ Please provide your analysis. Use the `git_grep_search_tool` and `read_file_tool
         )
         
         log_message = "🤖 Conducting initial codebase analysis for your question..."
-        if grep_results:
+        if feedback:
+            log_message = f"🔁 Re-analyzing codebase with feedback: {feedback}"
+        elif grep_results:
             log_message = "🤔 Re-evaluating plan with new grep results..."
 
         logging.info(log_message)
@@ -193,6 +207,212 @@ Based on this context, please provide your advice.
 class CliManager:
     """Manages CLI interactions and orchestrates the advice generation process."""
 
+    _COMMON_STYLE = """
+<style>
+    :root {
+        --primary-color: #4a90e2;
+        --secondary-color: #50e3c2;
+        --background-color: #f4f7f9;
+        --container-bg-color: #ffffff;
+        --text-color: #333;
+        --heading-color: #1a2533;
+        --border-color: #e0e6ed;
+        --code-bg-color: #2d2d2d;
+        --code-text-color: #f8f8f2;
+        --inline-code-bg: #eef2f5;
+        --inline-code-text: #d6336c;
+        --success-color: #2ecc71;
+        --danger-color: #e74c3c;
+        --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
+    }
+
+    body {
+        font-family: var(--font-family);
+        line-height: 1.7;
+        padding: 2rem;
+        background-color: var(--background-color);
+        color: var(--text-color);
+        margin: 0;
+    }
+
+    .main-container {
+        max-width: 1100px;
+        margin: auto;
+    }
+
+    h1, h2, h3 {
+        color: var(--heading-color);
+        font-weight: 700;
+        margin-top: 2rem;
+        margin-bottom: 1rem;
+    }
+
+    h1 {
+        text-align: center;
+        font-size: 2.8em;
+        margin-bottom: 2rem;
+        background: linear-gradient(45deg, var(--primary-color), var(--secondary-color));
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+    }
+
+    h2 {
+        font-size: 1.8em;
+        border-bottom: 3px solid var(--primary-color);
+        padding-bottom: 0.5rem;
+    }
+
+    .container {
+        background-color: var(--container-bg-color);
+        border: 1px solid var(--border-color);
+        padding: 2rem;
+        margin-bottom: 1.5rem;
+        border-radius: 12px;
+        box-shadow: 0 8px 24px rgba(26, 37, 51, 0.07);
+        transition: transform 0.2s ease-in-out, box-shadow 0.2s ease-in-out;
+    }
+
+    .container:hover {
+        transform: translateY(-3px);
+        box-shadow: 0 12px 32px rgba(26, 37, 51, 0.1);
+    }
+
+    ul, ol {
+        padding-left: 2rem;
+    }
+
+    li {
+        margin-bottom: 0.75rem;
+    }
+
+    code {
+        background-color: var(--inline-code-bg);
+        color: var(--inline-code-text);
+        padding: 0.2em 0.4em;
+        margin: 0;
+        font-size: 85%;
+        border-radius: 6px;
+        font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    }
+
+    pre {
+        background-color: var(--code-bg-color);
+        color: var(--code-text-color);
+        padding: 1.5rem;
+        border-radius: 8px;
+        overflow-x: auto;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+    }
+
+    pre code {
+        background-color: transparent;
+        color: inherit;
+        padding: 0;
+        margin: 0;
+        font-size: inherit;
+        border-radius: 0;
+    }
+
+    blockquote {
+        border-left: 5px solid var(--primary-color);
+        padding-left: 1.5rem;
+        color: #555;
+        margin-left: 0;
+        font-style: italic;
+    }
+
+    table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 1.5rem;
+        box-shadow: 0 4px 8px rgba(0,0,0,0.05);
+        border-radius: 8px;
+        overflow: hidden;
+    }
+
+    th, td {
+        border: 1px solid var(--border-color);
+        padding: 0.8rem 1rem;
+        text-align: left;
+    }
+
+    th {
+        background-color: var(--primary-color);
+        color: white;
+        font-weight: 500;
+    }
+
+    tr:nth-child(even) {
+        background-color: #f9fafb;
+    }
+
+    .actions {
+        text-align: center;
+        margin-top: 2rem;
+        padding-top: 2rem;
+        border-top: 1px solid var(--border-color);
+    }
+
+    .actions button {
+        color: white;
+        border: none;
+        padding: 1rem 2rem;
+        font-size: 1rem;
+        font-weight: 500;
+        border-radius: 8px;
+        cursor: pointer;
+        margin: 0.5rem;
+        transition: all 0.3s ease;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+
+    .actions button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 6px 16px rgba(0,0,0,0.15);
+    }
+
+    .approve-btn { background-color: var(--primary-color); }
+    .approve-btn:hover { background-color: #3a82d2; }
+
+    .reject-btn { background-color: var(--danger-color); }
+    .reject-btn:hover { background-color: #c0392b; }
+
+    .feedback-btn { background-color: var(--success-color); }
+    .feedback-btn:hover { background-color: #27ae60; }
+
+    .feedback-form {
+        margin-top: 2rem;
+        background-color: #fdfdfe;
+        padding: 1.5rem;
+        border-radius: 8px;
+        border: 1px solid var(--border-color);
+        text-align: left;
+    }
+
+    .feedback-form h3 {
+        margin-top: 0;
+        color: var(--heading-color);
+        font-size: 1.2em;
+    }
+
+    .feedback-form textarea {
+        width: calc(100% - 2rem);
+        min-height: 100px;
+        padding: 1rem;
+        border-radius: 8px;
+        border: 1px solid var(--border-color);
+        margin-bottom: 1rem;
+        font-family: var(--font-family);
+        font-size: 1rem;
+        resize: vertical;
+    }
+</style>
+"""
+
     def __init__(self):
         """Initializes the CLI manager and the AI advise agent."""
         self.ai_agent = AiAdviseAgent()
@@ -212,6 +432,14 @@ class CliManager:
         parser.add_argument(
             "--app-description", type=str, default="app_description.txt",
             help="Path to a text file describing the app's purpose."
+        )
+        parser.add_argument(
+            "--force", action="store_true",
+            help="Bypass user confirmation and proceed with advice generation automatically."
+        )
+        parser.add_argument(
+            "--port", type=int, default=DEFAULT_SERVER_PORT,
+            help=f"The port to run the local web server on for user approval (default: {DEFAULT_SERVER_PORT})."
         )
         return parser.parse_args()
 
@@ -262,6 +490,120 @@ class CliManager:
             logging.warning(f"Could not get untracked git files: {e}. Proceeding with tracked files only.")
             return git_files
 
+    def _create_and_open_analysis_html(self, analysis: AdviceAnalysis) -> str:
+        """Generates an HTML report for the analysis and returns the file path."""
+        if not analysis:
+            return ""
+
+        html_content = f"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Advice Generation Plan</title>
+    {self._COMMON_STYLE}
+</head>
+<body>
+    <div id="main-content" class="main-container">
+        <h1>🤖 AI Advice Generation Plan</h1>
+
+        <div class="container">
+            <h2>Your Question</h2>
+            <p>{self.args.task}</p>
+        </div>
+
+        <div class="container">
+            <h2>High-level Plan for Advice</h2>
+            <ol>
+                {''.join([f'<li>{step}</li>' for step in analysis.plan_for_advice]) if analysis.plan_for_advice else "<li>No plan provided.</li>"}
+            </ol>
+        </div>
+
+        <div class="container">
+            <h2>Overall Reasoning</h2>
+            <p>{analysis.reasoning or "No reasoning provided."}</p>
+        </div>
+
+        <div class="container">
+            <h2>Relevant Files for Context</h2>
+            <ul>
+                {''.join([f'<li><code>{file}</code></li>' for file in analysis.relevant_files]) if analysis.relevant_files else "<li>None</li>"}
+            </ul>
+        </div>
+
+        <div class="container actions">
+            <h2>Confirm Plan</h2>
+            <p>Do you want to proceed with generating the advice based on this plan?</p>
+            <button class="approve-btn" onclick="sendDecision('approve')">Approve & Generate Advice</button>
+            <button class="reject-btn" onclick="sendDecision('reject')">Reject</button>
+            <div class="feedback-form">
+                <h3>Refine the Plan</h3>
+                <p>If the plan isn't quite right, provide feedback below and submit it for a new plan.</p>
+                <textarea id="feedback-text" placeholder="e.g., 'Please also consider file X' or 'The plan seems to miss the point about Y'"></textarea>
+                <br>
+                <button class="feedback-btn" onclick="sendFeedback()">Submit Feedback</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const port = {self.args.port};
+        const mainContent = document.getElementById('main-content');
+
+        function showMessage(title, message) {{
+            mainContent.innerHTML = `<div class="container"><h1>${{title}}</h1><p>${{message}}</p></div>`;
+        }}
+
+        function sendDecision(decision) {{
+            fetch(`http://localhost:${{port}}/${{decision}}`, {{ method: 'POST' }})
+                .then(response => response.text())
+                .then(text => {{
+                    showMessage(text, 'You can close this tab now. This window will close automatically in 2 seconds.');
+                    setTimeout(() => window.close(), 2000);
+                }})
+                .catch(err => {{
+                    showMessage('Error', 'Could not contact server. Please check the console.');
+                    console.error('Error sending decision:', err);
+                }});
+        }}
+
+        function sendFeedback() {{
+            const feedback = document.getElementById('feedback-text').value;
+            if (!feedback) {{
+                alert('Please enter feedback before submitting.');
+                return;
+            }}
+            fetch(`http://localhost:${{port}}/feedback`, {{
+                method: 'POST',
+                headers: {{ 'Content-Type': 'application/json' }},
+                body: JSON.stringify({{ feedback: feedback }})
+            }})
+            .then(response => response.text())
+            .then(text => {{
+                showMessage(text, 'The agent is re-analyzing. You can close this tab now. This window will close automatically in 2 seconds.');
+                setTimeout(() => window.close(), 2000);
+            }})
+            .catch(err => {{
+                showMessage('Error', 'Could not contact server. Please check the console.');
+                console.error('Error sending feedback:', err);
+            }});
+        }}
+    </script>
+</body>
+</html>
+        """
+
+        plan_file_path = os.path.join(self.args.dir, "advice_plan.html")
+        try:
+            with open(plan_file_path, "w", encoding="utf-8") as f:
+                f.write(html_content)
+            logging.info(f"✅ Analysis plan saved to {plan_file_path}")
+            return plan_file_path
+        except Exception as e:
+            logging.error(f"❌ Could not write the HTML plan: {e}")
+            return ""
+
     def _create_and_open_advice_html(self, advice: Advice, analysis: AdviceAnalysis):
         """Generates an HTML report from the advice and opens it."""
         
@@ -274,42 +616,30 @@ class CliManager:
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AI-Generated Advice</title>
-    <style>
-        body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; padding: 20px; max-width: 1000px; margin: auto; background-color: #f7f9fc; color: #333; }}
-        h1, h2 {{ color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 10px; }}
-        h1 {{ text-align: center; font-size: 2.5em; color: #1a2533; }}
-        .container {{ background-color: #fff; border: 1px solid #ddd; padding: 25px; margin-bottom: 20px; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.05); }}
-        ul, ol {{ padding-left: 25px; }}
-        li {{ margin-bottom: 12px; }}
-        code {{ background-color: #ecf0f1; padding: 3px 6px; border-radius: 4px; font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; font-size: 0.95em; color: #c0392b; }}
-        pre code {{ white-space: pre-wrap; display: block; padding: 15px; background-color: #2d3436; color: #dfe6e9; border-radius: 5px; }}
-        blockquote {{ border-left: 4px solid #3498db; padding-left: 15px; color: #666; margin-left: 0; }}
-        table {{ width: 100%; border-collapse: collapse; margin-top: 20px; }}
-        th, td {{ border: 1px solid #ddd; padding: 12px; text-align: left; }}
-        th {{ background-color: #3498db; color: white; }}
-    </style>
+    {self._COMMON_STYLE}
 </head>
 <body>
-    <h1>🤖 AI-Generated Advice 🤖</h1>
+    <div class="main-container">
+        <h1>🤖 AI-Generated Advice</h1>
 
-    <div class="container">
-        <h2>Your Question</h2>
-        <p>{self.args.task}</p>
+        <div class="container">
+            <h2>Your Question</h2>
+            <p>{self.args.task}</p>
+        </div>
+
+        <div class="container">
+            <h2>Advice</h2>
+            {response_html}
+        </div>
+
+        <div class="container">
+            <h2>References</h2>
+            <p>This advice was formulated based on the following files:</p>
+            <ul>
+                {''.join([f'<li><code>{file}</code></li>' for file in advice.references]) if advice.references else "<li>No specific files were referenced.</li>"}
+            </ul>
+        </div>
     </div>
-
-    <div class="container">
-        <h2>Advice</h2>
-        {response_html}
-    </div>
-
-    <div class="container">
-        <h2>References</h2>
-        <p>This advice was formulated based on the following files:</p>
-        <ul>
-            {''.join([f'<li><code>{file}</code></li>' for file in advice.references]) if advice.references else "<li>No specific files were referenced.</li>"}
-        </ul>
-    </div>
-
 </body>
 </html>
         """
@@ -332,42 +662,87 @@ class CliManager:
             logging.error("No tracked files found in this git repository. Exiting.")
             return
 
-        # 2. Analysis Loop to Gain Confidence
+        # 2. Analysis and Confirmation Loop
         analysis: Optional[AdviceAnalysis] = None
-        grep_results = ""
-        analysis_retries = 0
-        while analysis_retries < MAX_ANALYSIS_GREP_RETRIES:
-            current_analysis = self.ai_agent.get_advice_analysis(
-                self.args.task,
-                all_repo_files,
-                app_desc_content,
-                git_grep_search_tool=self._git_grep_search_tool,
-                read_file_tool=self._read_file_content_tool,
-                grep_results=grep_results or None
-            )
+        previous_analysis: Optional[AdviceAnalysis] = None
+        user_feedback: Optional[str] = None
 
-            if current_analysis.additional_grep_queries_needed:
-                analysis_retries += 1
-                logging.info("🤖 AI has requested more information via git grep to improve its plan. Running queries automatically.")
-
-                new_results = []
-                for query in current_analysis.additional_grep_queries_needed:
-                    result = self._git_grep_search_tool(query)
-                    new_results.append(result)
-                
-                grep_results = "\n\n".join(new_results)
-                analysis = None  # Not a final analysis
+        while True:  # This loop handles user feedback on the plan
+            # A. Get Analysis
+            if user_feedback:
+                analysis = self.ai_agent.get_advice_analysis(
+                    self.args.task,
+                    all_repo_files,
+                    app_desc_content,
+                    feedback=user_feedback,
+                    previous_plan=previous_analysis,
+                    git_grep_search_tool=self._git_grep_search_tool,
+                    read_file_tool=self._read_file_content_tool
+                )
+                user_feedback = None
             else:
-                analysis = current_analysis
-                break  # We have a final analysis
+                # Grep confidence loop
+                grep_results = ""
+                analysis_retries = 0
+                while analysis_retries < MAX_ANALYSIS_GREP_RETRIES:
+                    current_analysis = self.ai_agent.get_advice_analysis(
+                        self.args.task,
+                        all_repo_files,
+                        app_desc_content,
+                        git_grep_search_tool=self._git_grep_search_tool,
+                        read_file_tool=self._read_file_content_tool,
+                        grep_results=grep_results or None
+                    )
 
-        if not analysis:
-            logging.error(f"❌ Failed to get a confident analysis from the AI after {MAX_ANALYSIS_GREP_RETRIES} attempts.")
-            return
+                    if current_analysis.additional_grep_queries_needed:
+                        analysis_retries += 1
+                        logging.info("🤖 AI has requested more information via git grep. Running queries.")
+                        new_results = [self._git_grep_search_tool(q) for q in current_analysis.additional_grep_queries_needed]
+                        grep_results = "\n\n".join(new_results)
+                        analysis = None
+                    else:
+                        analysis = current_analysis
+                        break
+                
+                if not analysis:
+                    logging.error(f"❌ Failed to get a confident analysis after {MAX_ANALYSIS_GREP_RETRIES} attempts.")
+                    return
 
-        logging.info("✅ Analysis complete. Identified relevant files for context.")
-        
+            # B. Display Analysis and get confirmation
+            logging.info("✅ Analysis complete. Awaiting user confirmation in browser.")
+            plan_html_path = self._create_and_open_analysis_html(analysis)
+            if not plan_html_path:
+                return  # Error already logged
+
+            if not analysis.relevant_files and not analysis.plan_for_advice:
+                logging.info("AI analysis resulted in no plan or relevant files. The advice may be generic. Proceeding...")
+                break
+
+            # C. User Confirmation
+            if not self.args.force:
+                webbrowser.open(f"file://{os.path.realpath(plan_html_path)}")
+                decision, data = wait_for_user_approval_from_browser(os.path.realpath(plan_html_path), self.args.port)
+
+                if decision == 'approve':
+                    logging.info("✅ Plan approved by user. Proceeding with advice generation.")
+                    break
+                elif decision == 'reject':
+                    logging.info("❌ Plan rejected by user. Operation cancelled.")
+                    return
+                elif decision == 'feedback':
+                    user_feedback = data
+                    previous_analysis = analysis
+                    logging.info(f"Re-running analysis with new feedback...")
+                    # continue loop
+                else:
+                    logging.error("No decision received from the browser. Exiting.")
+                    return
+            else:
+                logging.info("✅ Plan approved automatically (--force).")
+                break
+
         # 3. Gather Context
+        logging.info("Gathering context from relevant files...")
         if not analysis.relevant_files:
             logging.warning("AI analysis resulted in no relevant files to read. The advice may be generic.")
             context_str = "No relevant files were found to provide context."
