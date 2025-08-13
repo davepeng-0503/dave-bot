@@ -394,6 +394,8 @@ def create_code_agent_html_viewer(port: int) -> Optional[str]:
             completedFiles: 0,
             timelineItemCounter: 0,
             pollingActive: false,
+            generationStartTime: null,
+            animationIntervalId: null,
         }};
 
         // UTILITY FUNCTIONS
@@ -541,6 +543,51 @@ def create_code_agent_html_viewer(port: int) -> Optional[str]:
                 </div>`;
         }}
 
+        // PROGRESS BAR ANIMATION
+        function animateProgressBar() {{
+            if (!state.generationStartTime || state.status === 'finished' || state.totalFiles === 0) {{
+                if (state.animationIntervalId) {{
+                    clearInterval(state.animationIntervalId);
+                    state.animationIntervalId = null;
+                }}
+                return;
+            }}
+
+            const assumedTimePerFile = 3 * 60 * 1000; // 3 minutes in milliseconds
+            
+            // This is the progress from files that are confirmed as 'done' by the server.
+            const baseProgress = (state.completedFiles / state.totalFiles) * 100;
+
+            // This is the expected start time for the *current* file being animated.
+            const currentFileStartTime = state.generationStartTime + (state.completedFiles * assumedTimePerFile);
+            
+            // How far are we into the animation for the current file?
+            const timeIntoCurrentFileAnimation = Date.now() - currentFileStartTime;
+
+            let animatedProgressInCurrentFile = 0;
+            if (timeIntoCurrentFileAnimation > 0) {{
+                // Calculate progress within the current file (0 to 1), capped at 1 (stall if it takes longer)
+                const progressRatio = Math.min(1, timeIntoCurrentFileAnimation / assumedTimePerFile);
+                // Convert this ratio to its percentage value of the total
+                animatedProgressInCurrentFile = (progressRatio / state.totalFiles) * 100;
+            }}
+
+            let totalAnimatedProgress = baseProgress + animatedProgressInCurrentFile;
+            totalAnimatedProgress = Math.min(totalAnimatedProgress, 100);
+
+            const progressBar = document.getElementById('generation-progress-bar');
+            if (progressBar) {{
+                const currentWidth = parseFloat(progressBar.style.width) || 0;
+                // We only want the animation to move the bar forward.
+                // If a file completes early, `updateGenerationProgress` will snap the bar forward,
+                // setting a new `currentWidth`. The animation shouldn't pull it back.
+                if (totalAnimatedProgress > currentWidth) {{
+                    progressBar.style.width = `${{totalAnimatedProgress}}%`;
+                    progressBar.textContent = `${{Math.floor(totalAnimatedProgress)}}%`;
+                }}
+            }}
+        }}
+
         // STATUS POLLING AND EVENT HANDLING
         function pollStatus() {{
             if (!state.pollingActive) return;
@@ -565,6 +612,10 @@ def create_code_agent_html_viewer(port: int) -> Optional[str]:
                     }}
                 }})
                 .catch(err => {{
+                    if (state.animationIntervalId) {{
+                        clearInterval(state.animationIntervalId);
+                        state.animationIntervalId = null;
+                    }}
                     state.pollingActive = false;
                     showMessage('Connection Error', 'Connection to the agent was lost. Please check the console output.', true);
                     console.error('Error polling status:', err);
@@ -602,6 +653,10 @@ def create_code_agent_html_viewer(port: int) -> Optional[str]:
                     break;
                 
                 case 'error':
+                    if (state.animationIntervalId) {{
+                        clearInterval(state.animationIntervalId);
+                        state.animationIntervalId = null;
+                    }}
                     showMessage('Agent Error', data.message, true);
                     break;
             }}
@@ -658,7 +713,7 @@ def create_code_agent_html_viewer(port: int) -> Optional[str]:
                 const progressBar = document.getElementById('generation-progress-bar');
                 if (progressBar) {{
                     progressBar.style.width = `${{percentage}}%`;
-                    progressBar.textContent = `${{percentage}}% Complete`;
+                    progressBar.textContent = `${{percentage}}%`;
                 }}
 
                 const elementId = `item-${{data.file_path.replace(/[^a-zA-Z0-9]/g, '-')}}`;
@@ -677,6 +732,10 @@ def create_code_agent_html_viewer(port: int) -> Optional[str]:
                 }}
 
             }} else if (data.status === 'finished') {{
+                if (state.animationIntervalId) {{
+                    clearInterval(state.animationIntervalId);
+                    state.animationIntervalId = null;
+                }}
                 const progressBar = document.getElementById('generation-progress-bar');
                 if (progressBar) {{
                     progressBar.style.width = '100%';
@@ -700,6 +759,9 @@ def create_code_agent_html_viewer(port: int) -> Optional[str]:
                 const useFlash = document.getElementById('use-flash-model').checked;
                 renderGenerationView();
                 
+                state.generationStartTime = Date.now();
+                if (state.animationIntervalId) clearInterval(state.animationIntervalId);
+                state.animationIntervalId = setInterval(animateProgressBar, 100);
                 
                 fetch(`http://localhost:${{port}}/approve`, {{
                     method: 'POST',
