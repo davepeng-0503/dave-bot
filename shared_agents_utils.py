@@ -159,7 +159,7 @@ class AgentTools:
         logging.info(f"🛠️ Running git grep search for: '{query}' in '{self.directory}'")
         if self.status_queue:
             self.status_queue.put({
-                "status": "tool_call",
+                "status": "tool_used",
                 "tool_name": "git_grep_search",
                 "tool_input": query,
             })
@@ -195,7 +195,7 @@ class AgentTools:
         logging.info(f"Agent tool reading file: {file_path}")
         if self.status_queue:
             self.status_queue.put({
-                "status": "tool_call",
+                "status": "tool_used",
                 "tool_name": "read_file",
                 "tool_input": file_path,
             })
