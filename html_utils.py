@@ -394,12 +394,45 @@ def create_code_agent_html_viewer(port: int) -> Optional[str]:
             completedFiles: 0,
             timelineItemCounter: 0,
             pollingActive: false,
+            progressAnimationTimer: null,
         }};
 
         // UTILITY FUNCTIONS
         function escapeHtml(unsafe) {{
             if (typeof unsafe !== 'string') return '';
             return unsafe.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+        }}
+
+        function animateProgressBar(startPercent, endPercent, duration) {{
+            const progressBar = document.getElementById('generation-progress-bar');
+            if (!progressBar) return;
+
+            if (state.progressAnimationTimer) {{
+                cancelAnimationFrame(state.progressAnimationTimer);
+            }}
+
+            let startTime = null;
+
+            function animationStep(timestamp) {{
+                if (!startTime) startTime = timestamp;
+                const elapsed = timestamp - startTime;
+                const progress = Math.min(elapsed / duration, 1);
+                
+                const currentPercent = startPercent + (endPercent - startPercent) * progress;
+                
+                progressBar.style.width = `${{currentPercent}}%`;
+                progressBar.textContent = `${{Math.floor(currentPercent)}}%`;
+
+                if (progress < 1) {{
+                    state.progressAnimationTimer = requestAnimationFrame(animationStep);
+                }} else {{
+                    progressBar.style.width = `${{endPercent}}%`;
+                    progressBar.textContent = `${{Math.floor(endPercent)}}%`;
+                    state.progressAnimationTimer = null;
+                }}
+            }}
+
+            state.progressAnimationTimer = requestAnimationFrame(animationStep);
         }}
 
         // RENDER FUNCTIONS
@@ -581,17 +614,6 @@ def create_code_agent_html_viewer(port: int) -> Optional[str]:
             state.status = newStatus;
 
             switch (newStatus) {{
-                case 'planning':
-                    // If we get a 'planning' status when we were in 'plan_ready',
-                    // it means we're re-planning based on feedback.
-                    if (oldStatus === 'plan_ready') {{
-                        renderPlanningView('Re-analyzing with your feedback...');
-                    }} else {{
-                        // This handles the initial planning view
-                        renderPlanningView();
-                    }}
-                    break;
-                
                 case 'tool_used':
                     updateToolLog(data);
                     break;
@@ -643,6 +665,8 @@ def create_code_agent_html_viewer(port: int) -> Optional[str]:
                 logContainer.innerHTML = '';
             }}
 
+            const FILE_PROCESSING_DURATION = 3 * 60 * 1000; // 3 minutes
+
             if (data.status === 'writing') {{
                 const elementId = `item-${{data.file_path.replace(/[^a-zA-Z0-9]/g, '-')}}`;
                 
@@ -658,14 +682,23 @@ def create_code_agent_html_viewer(port: int) -> Optional[str]:
                 logContainer.appendChild(timelineItem);
                 state.timelineItemCounter++;
 
+                const startPercent = state.totalFiles > 0 ? (state.completedFiles / state.totalFiles) * 100 : 0;
+                const endPercent = state.totalFiles > 0 ? ((state.completedFiles + 1) / state.totalFiles) * 100 : 100;
+                animateProgressBar(startPercent, endPercent, FILE_PROCESSING_DURATION);
+
             }} else if (data.status === 'done') {{
+                if (state.progressAnimationTimer) {{
+                    cancelAnimationFrame(state.progressAnimationTimer);
+                    state.progressAnimationTimer = null;
+                }}
+
                 state.completedFiles++;
                 
-                const percentage = state.totalFiles > 0 ? Math.round((state.completedFiles / state.totalFiles) * 100) : 0;
+                const percentage = state.totalFiles > 0 ? (state.completedFiles / state.totalFiles) * 100 : 0;
                 const progressBar = document.getElementById('generation-progress-bar');
                 if (progressBar) {{
                     progressBar.style.width = `${{percentage}}%`;
-                    progressBar.textContent = `${{percentage}}% Complete`;
+                    progressBar.textContent = `${{Math.round(percentage)}}%`;
                 }}
 
                 const elementId = `item-${{data.file_path.replace(/[^a-zA-Z0-9]/g, '-')}}`;
@@ -684,10 +717,15 @@ def create_code_agent_html_viewer(port: int) -> Optional[str]:
                 }}
 
             }} else if (data.status === 'finished') {{
+                if (state.progressAnimationTimer) {{
+                    cancelAnimationFrame(state.progressAnimationTimer);
+                    state.progressAnimationTimer = null;
+                }}
+
                 const progressBar = document.getElementById('generation-progress-bar');
                 if (progressBar) {{
                     progressBar.style.width = '100%';
-                    progressBar.textContent = '100% Complete';
+                    progressBar.textContent = '100%';
                 }}
 
                 const finishedItem = document.createElement('div');
@@ -740,6 +778,7 @@ def create_code_agent_html_viewer(port: int) -> Optional[str]:
                 return;
             }}
             
+            renderPlanningView();
             fetch(`http://localhost:${{port}}/feedback`, {{
                 method: 'POST',
                 headers: {{ 'Content-Type': 'application/json' }},
@@ -747,8 +786,6 @@ def create_code_agent_html_viewer(port: int) -> Optional[str]:
             }})
             .then(res => {{
                 if (!res.ok) throw new Error('Feedback request failed');
-                // The backend will now send a 'planning' status, which pollStatus will pick up.
-                // The view transition is now handled by handleStatusUpdate.
             }})
             .catch(err => {{
                 showMessage('Error', 'Could not submit feedback. Please check the agent console.', true);

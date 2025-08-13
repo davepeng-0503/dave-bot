@@ -603,10 +603,10 @@ class CliManager:
             # 3. Analysis and Confirmation Loop
             previous_analysis: Optional[CodeAnalysis] = None
             user_feedback: Optional[str] = None
-
+            feedback_loop = 0
             while True:  # This loop handles user feedback on the plan
                 # A. Get Analysis
-                if server:
+                if server and feedback_loop == 0:
                     self.status_queue.put({"status": "planning"})
 
                 if user_feedback:
@@ -685,8 +685,12 @@ class CliManager:
                     elif decision == 'feedback':
                         user_feedback = data
                         previous_analysis = analysis
+                        feedback_loop += 1
                         logging.info("Re-running analysis with new feedback...")
                         # The loop will continue, and the JS will show the planning view again.
+                        decision = None
+                        data = None
+                        server.reset_decision()
                         continue
                     else:
                         logging.error("No decision received from the browser. Exiting.")
