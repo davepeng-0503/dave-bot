@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from pydantic_ai import Agent
 from pydantic_ai.models.google import GoogleModelSettings
 
+from html_utils import create_code_plan_html
 from shared_agents_utils import (
     AgentTools,
     ApprovalHandler,
@@ -75,13 +76,18 @@ class CodeAnalysis(BaseModel):
         default=[],
         description="A list of additional 'git grep' queries that you believe would significantly improve your confidence in the plan. If you are less than 90% confident, you should request more information via grep. Leave empty if you are confident."
     )
+    use_flash_model: bool = Field(
+        default=False,
+        description="Set to true if the task is simple (e.g., minor text changes, version bumps, simple refactors) and can be handled by a faster, less powerful model for code generation. For complex tasks, leave as false."
+    )
 
 
 class GeneratedCode(BaseModel):
     """Represents the AI-generated code for a single file."""
     file_path: str = Field(description="The path of the file for which code is being generated.")
     code: str = Field(description="The complete, production-ready source code for the file.")
-    reasoning: str = Field(description="A brief explanation of the changes made or the file's purpose.")
+    summary: str = Field(description="A concise summary of the changes made to the file. This should be a high-level overview of what was changed, added, or removed.")
+    reasoning: str = Field(description="A brief explanation of why the changes were made, linking them back to the overall task.")
     requires_more_context: bool = Field(
         default=False,
         description="Set to true if you cannot generate the code for the CURRENT file due to insufficient context."
@@ -124,6 +130,7 @@ You are an expert software developer planning a coding task. Your goal is to cre
 **CRITICAL**:
 - **`plan`**: This should be a detailed, step-by-step description of the changes you will make.
 - **`generation_order`**: This is the most important part of your execution plan. It must list all files from `files_to_edit` and `files_to_create` in the correct dependency order.
+- **Model Selection**: If the task is very simple (e.g., fixing a typo, updating a version number, a simple one-line change), set `use_flash_model` to `true`. This uses a faster model for code generation. For anything more complex, leave it `false` to use the more powerful model.
 
 Project Description:
 ---
@@ -186,7 +193,7 @@ Please provide your analysis. Use the `git_grep_search_tool` and `read_file_tool
         )
         return analysis.output
 
-    def generate_file_content(self, task: str, context: str, file_path: str, all_repo_files: List[str], generation_order: List[str], original_content: Optional[str] = None, strict: bool = True) -> GeneratedCode:
+    def generate_file_content(self, task: str, context: str, file_path: str, all_repo_files: List[str], generation_order: List[str], original_content: Optional[str] = None, strict: bool = True, use_flash_model: bool = False) -> GeneratedCode:
         """Generates the full code for a given file."""
         action = "editing" if original_content is not None else "creating"
         
@@ -198,8 +205,9 @@ you will generate the full, production-ready code for the specified file path.
 **IMPORTANT RULES**:
 1.  Your output must be the complete, raw code for the file. Do not include markdown backticks (```python ... ```) or any other explanations in the `code` field.
 2.  The code should be well-structured, follow best practices, and be ready for integration.
-3.  {"You must only make code changes directly related to completion of the task, refactors and cleaning up should not be prioritised unless specifically part of the task given" if strict else "You may make other changes as you see fit to improve code maintainability and clarity."}
-4.  **Context Management**:
+3.  You must also provide a concise `summary` of the changes and a `reasoning` for why these changes were made.
+4.  {"You must only make code changes directly related to completion of the task, refactors and cleaning up should not be prioritised unless specifically part of the task given" if strict else "You may make other changes as you see fit to improve code maintainability and clarity."}
+5.  **Context Management**:
     a. **If you cannot generate the code for `{file_path}` due to insufficient context**: Set `requires_more_context` to `true`, leave `code` empty, and explain what you need in `context_request`.
     b. **If you can generate the code for `{file_path}` but you anticipate needing more context for FUTURE files**: Generate the code for the current file. Then, populate the `needed_context_for_future_files` list with the full paths of any other files you will need to see to complete subsequent steps. This is crucial for efficiency.
 """
@@ -225,15 +233,17 @@ Original content of `{file_path}`:
 {original_content}
 ---
 """
-        prompt += "\nPlease generate the complete, new source code for this file. If you lack context for this file or foresee needing context for future files, please request it."
+        prompt += "\nPlease generate the complete, new source code for this file, along with a summary and reasoning. If you lack context for this file or foresee needing context for future files, please request it."
+
+        model_name = "gemini-2.5-flash" if use_flash_model else "gemini-2.5-pro"
 
         generation_agent = Agent(
-            self._get_gemini_model('gemini-2.5-pro'), 
+            self._get_gemini_model(model_name), 
             output_type=GeneratedCode, 
             system_prompt=system_prompt
         )
         
-        logging.info(f"💡 Generating new code for {file_path}...")
+        logging.info(f"💡 Generating new code for {file_path} using {model_name}...")
         generated_code = generation_agent.run_sync(
             prompt,
             model_settings=GoogleModelSettings(google_safety_settings=self.get_safety_settings()),
@@ -245,219 +255,6 @@ Original content of `{file_path}`:
 
 class CliManager:
     """Manages CLI interactions, file I/O, and orchestrates the analysis and code generation."""
-
-    _COMMON_STYLE = """
-<style>
-    :root {
-        --primary-color: #4a90e2;
-        --secondary-color: #50e3c2;
-        --background-color: #f4f7f9;
-        --container-bg-color: #ffffff;
-        --text-color: #333;
-        --heading-color: #1a2533;
-        --border-color: #e0e6ed;
-        --code-bg-color: #2d2d2d;
-        --code-text-color: #f8f8f2;
-        --inline-code-bg: #eef2f5;
-        --inline-code-text: #d6336c;
-        --success-color: #2ecc71;
-        --danger-color: #e74c3c;
-        --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
-    }
-
-    body {
-        font-family: var(--font-family);
-        line-height: 1.7;
-        padding: 2rem;
-        background-color: var(--background-color);
-        color: var(--text-color);
-        margin: 0;
-    }
-
-    .main-container {
-        max-width: 1100px;
-        margin: auto;
-    }
-
-    h1, h2, h3 {
-        color: var(--heading-color);
-        font-weight: 700;
-        margin-top: 2rem;
-        margin-bottom: 1rem;
-    }
-
-    h1 {
-        text-align: center;
-        font-size: 2.8em;
-        margin-bottom: 2rem;
-        background: linear-gradient(45deg, var(--primary-color), var(--secondary-color));
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        background-clip: text;
-    }
-
-    h2 {
-        font-size: 1.8em;
-        border-bottom: 3px solid var(--primary-color);
-        padding-bottom: 0.5rem;
-    }
-
-    .container {
-        background-color: var(--container-bg-color);
-        border: 1px solid var(--border-color);
-        padding: 2rem;
-        margin-bottom: 1.5rem;
-        border-radius: 12px;
-        box-shadow: 0 8px 24px rgba(26, 37, 51, 0.07);
-        transition: transform 0.2s ease-in-out, box-shadow 0.2s ease-in-out;
-    }
-
-    .container:hover {
-        transform: translateY(-3px);
-        box-shadow: 0 12px 32px rgba(26, 37, 51, 0.1);
-    }
-
-    ul, ol {
-        padding-left: 2rem;
-    }
-
-    li {
-        margin-bottom: 0.75rem;
-    }
-
-    code {
-        background-color: var(--inline-code-bg);
-        color: var(--inline-code-text);
-        padding: 0.2em 0.4em;
-        margin: 0;
-        font-size: 85%;
-        border-radius: 6px;
-        font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
-    }
-
-    pre {
-        background-color: var(--code-bg-color);
-        color: var(--code-text-color);
-        padding: 1.5rem;
-        border-radius: 8px;
-        overflow-x: auto;
-        white-space: pre-wrap;
-        word-wrap: break-word;
-    }
-
-    pre code {
-        background-color: transparent;
-        color: inherit;
-        padding: 0;
-        margin: 0;
-        font-size: inherit;
-        border-radius: 0;
-    }
-
-    blockquote {
-        border-left: 5px solid var(--primary-color);
-        padding-left: 1.5rem;
-        color: #555;
-        margin-left: 0;
-        font-style: italic;
-    }
-
-    table {
-        width: 100%;
-        border-collapse: collapse;
-        margin-top: 1.5rem;
-        box-shadow: 0 4px 8px rgba(0,0,0,0.05);
-        border-radius: 8px;
-        overflow: hidden;
-    }
-
-    th, td {
-        border: 1px solid var(--border-color);
-        padding: 0.8rem 1rem;
-        text-align: left;
-    }
-
-    th {
-        background-color: var(--primary-color);
-        color: white;
-        font-weight: 500;
-    }
-
-    tr:nth-child(even) {
-        background-color: #f9fafb;
-    }
-
-    .actions {
-        text-align: center;
-        margin-top: 2rem;
-        padding-top: 2rem;
-        border-top: 1px solid var(--border-color);
-    }
-
-    .actions button {
-        color: white;
-        border: none;
-        padding: 1rem 2rem;
-        font-size: 1rem;
-        font-weight: 500;
-        border-radius: 8px;
-        cursor: pointer;
-        margin: 0.5rem;
-        transition: all 0.3s ease;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
-    }
-
-    .actions button:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 6px 16px rgba(0,0,0,0.15);
-    }
-
-    .actions button:disabled {
-        background-color: #bdc3c7;
-        cursor: not-allowed;
-        transform: none;
-        box-shadow: none;
-    }
-
-    .approve-btn { background-color: var(--primary-color); }
-    .approve-btn:hover { background-color: #3a82d2; }
-
-    .reject-btn { background-color: var(--danger-color); }
-    .reject-btn:hover { background-color: #c0392b; }
-
-    .feedback-btn { background-color: var(--success-color); }
-    .feedback-btn:hover { background-color: #27ae60; }
-
-    .feedback-form {
-        margin-top: 2rem;
-        background-color: #fdfdfe;
-        padding: 1.5rem;
-        border-radius: 8px;
-        border: 1px solid var(--border-color);
-        text-align: left;
-    }
-
-    .feedback-form h3 {
-        margin-top: 0;
-        color: var(--heading-color);
-        font-size: 1.2em;
-    }
-
-    .feedback-form textarea {
-        width: calc(100% - 2rem);
-        min-height: 100px;
-        padding: 1rem;
-        border-radius: 8px;
-        border: 1px solid var(--border-color);
-        margin-bottom: 1rem;
-        font-family: var(--font-family);
-        font-size: 1rem;
-        resize: vertical;
-    }
-</style>
-"""
 
     status_queue: Optional[queue.Queue]
     
@@ -569,276 +366,6 @@ class CliManager:
         logging.info("✅ Analysis plan reconciled successfully.")
         return True
 
-    def _format_files_to_create_html(self, files_to_create: List[NewFile]) -> str:
-        """Formats the list of files to create into an HTML table."""
-        if not files_to_create:
-            return "<p>None</p>"
-        
-        table_rows = ""
-        for file in files_to_create:
-            suggestions_html = "<ul>" + "".join([f"<li><code>{sug}</code></li>" for sug in file.content_suggestions]) + "</ul>" if file.content_suggestions else "None"
-            table_rows += f"""
-            <tr>
-                <td><code>{file.file_path}</code></td>
-                <td>{file.reasoning}</td>
-                <td>{suggestions_html}</td>
-            </tr>
-            """
-
-        return f"""
-        <table>
-            <thead>
-                <tr>
-                    <th>File Path</th>
-                    <th>Reasoning</th>
-                    <th>Content Suggestions</th>
-                </tr>
-            </thead>
-            <tbody>
-                {table_rows}
-            </tbody>
-        </table>
-        """
-
-    def _create_and_open_plan_html(self, analysis: CodeAnalysis) -> str:
-        """Generates an HTML report for the analysis and returns the file path."""
-        if not analysis:
-            return ""
-
-        html_content = f"""
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Code Generation Plan</title>
-    {self._COMMON_STYLE}
-</head>
-<body>
-    <div id="main-content" class="main-container">
-        <h1>🤖 AI Code Generation Plan</h1>
-
-        <div class="container">
-            <h2>Task</h2>
-            <p>{self.args.task}</p>
-        </div>
-
-        <div class="container">
-            <h2>High-level Plan</h2>
-            <ol>
-                {''.join([f'<li>{step}</li>' for step in analysis.plan]) if analysis.plan else "<li>No plan provided.</li>"}
-            </ol>
-        </div>
-
-        <div class="container">
-            <h2>Overall Reasoning</h2>
-            <p>{analysis.reasoning or "No reasoning provided."}</p>
-        </div>
-
-        <div class="container">
-            <h2>File Breakdown</h2>
-
-            <h3>Relevant Files for Context</h3>
-            <ul>
-                {''.join([f'<li><code>{file}</code></li>' for file in analysis.relevant_files]) if analysis.relevant_files else "<li>None</li>"}
-            </ul>
-
-            <h3>Files to Edit</h3>
-            <ul>
-                {''.join([f'<li><code>{file}</code></li>' for file in analysis.files_to_edit]) if analysis.files_to_edit else "<li>None</li>"}
-            </ul>
-
-            <h3>Files to Create</h3>
-            {self._format_files_to_create_html(analysis.files_to_create)}
-        </div>
-        
-        <div class="container">
-            <h2>Proposed Generation Order</h2>
-            <ol>
-                {''.join([f'<li><code>{file}</code></li>' for file in analysis.generation_order]) if analysis.generation_order else "<li>None</li>"}
-            </ol>
-        </div>
-
-        <div class="container actions">
-            <h2>Confirm Plan</h2>
-            <p>Do you want to proceed with generating the code based on this plan?</p>
-            <button class="approve-btn" onclick="sendDecision('approve')">Approve & Generate Code</button>
-            <button class="reject-btn" onclick="sendDecision('reject')">Reject</button>
-            <div class="feedback-form">
-                <h3>Refine the Plan</h3>
-                <p>If the plan isn't quite right, provide feedback below and submit it for a new plan.</p>
-                <textarea id="feedback-text" placeholder="e.g., 'Please also create a new file for utility functions' or 'The plan seems to miss the point about Y'"></textarea>
-                <br>
-                <button class="feedback-btn" onclick="sendFeedback()">Submit Feedback</button>
-            </div>
-        </div>
-    </div>
-
-    <script>
-        const port = {self.args.port};
-        const mainContent = document.getElementById('main-content');
-
-        function escapeHtml(unsafe) {{
-            return unsafe
-                .replace(/&/g, "&amp;")
-                .replace(/</g, "&lt;")
-                .replace(/>/g, "&gt;")
-                .replace(/"/g, "&quot;")
-                .replace(/'/g, "&#039;");
-        }}
-
-        function showMessage(title, message) {{
-            mainContent.innerHTML = `<div class="container"><h1>${{title}}</h1><p>${{message}}</p></div>`;
-        }}
-
-        function pollStatus() {{
-            fetch(`http://localhost:${{port}}/status`)
-                .then(response => {{
-                    if (response.status === 204) {{
-                        setTimeout(pollStatus, 1000); // Poll again
-                        return null;
-                    }}
-                    if (!response.ok) throw new Error(`HTTP error! status: ${{response.status}}`);
-                    return response.json();
-                }})
-                .then(data => {{
-                    if (!data) return;
-
-                    const logContainer = document.getElementById('generation-log');
-                    if (!logContainer) return;
-
-                    // Clear "Waiting for generation to start..." message on first update
-                    if (logContainer.querySelector('p')?.textContent.includes('Waiting for generation')) {{
-                        logContainer.innerHTML = '';
-                    }}
-
-                    if (data.status === 'writing') {{
-                        const writingElement = document.createElement('p');
-                        // Create a unique but valid ID for the element
-                        const elementId = `writing-${{data.file_path.replace(/[^a-zA-Z0-9]/g, '-')}}`;
-                        writingElement.id = elementId;
-                        writingElement.innerHTML = `Writing file: <code>${{data.file_path}}</code>...`;
-                        logContainer.appendChild(writingElement);
-
-                    }} else if (data.status === 'done') {{
-                        // Remove the "writing..." message for this file
-                        const elementId = `writing-${{data.file_path.replace(/[^a-zA-Z0-9]/g, '-')}}`;
-                        const writingElement = document.getElementById(elementId);
-                        if (writingElement) {{
-                            writingElement.remove();
-                        }}
-
-                        const doneElement = document.createElement('div');
-                        doneElement.className = 'file-generation-result';
-                        doneElement.style.marginBottom = '1.5rem';
-                        doneElement.innerHTML = `
-                            <h3>Generated File: <code>${{data.file_path}}</code></h3>
-                            <pre><code>${{escapeHtml(data.code)}}</code></pre>
-                        `;
-                        logContainer.appendChild(doneElement);
-
-                    }} else if (data.status === 'finished') {{
-                        const finishedElement = document.createElement('p');
-                        finishedElement.style.marginTop = '1rem';
-                        finishedElement.style.color = 'var(--success-color)';
-                        finishedElement.innerHTML = '✅ All files generated successfully! You can close this window.';
-                        logContainer.appendChild(finishedElement);
-                        return; // Stop polling
-                    }}
-                    setTimeout(pollStatus, 500); // Poll for next update
-                }})
-                .catch(err => {{
-                    const logContainer = document.getElementById('generation-log');
-                    if (logContainer) {{
-                        logContainer.innerHTML += `<p style="color: var(--danger-color);">Connection to server lost. Please check the agent's console output.</p>`;
-                    }}
-                    console.error('Error polling status:', err);
-                }});
-        }}
-
-        function sendDecision(decision) {{
-            if (decision === 'approve') {{
-                // Disable all action buttons to prevent re-submission
-                document.querySelectorAll('.actions button').forEach(button => button.disabled = true);
-
-                // Create a new container for the generation status and append it
-                const generationContainer = document.createElement('div');
-                generationContainer.className = 'container';
-                generationContainer.innerHTML = `
-                    <h2>⚙️ Code Generation Progress</h2>
-                    <div id="generation-log">
-                        <p>Waiting for generation to start...</p>
-                    </div>
-                `;
-                // Find the actions container and insert the new container before it
-                const actionsContainer = document.querySelector('.actions');
-                if (actionsContainer) {{
-                    actionsContainer.parentNode.insertBefore(generationContainer, actionsContainer);
-                }} else {{
-                    // Fallback if actions container isn't found
-                    mainContent.appendChild(generationContainer);
-                }}
-                
-                fetch(`http://localhost:${{port}}/approve`, {{ method: 'POST' }})
-                    .then(res => {{
-                        if (!res.ok) throw new Error('Approval request failed');
-                        pollStatus();
-                    }})
-                    .catch(err => {{
-                        const log = document.getElementById('generation-log');
-                        if (log) log.innerHTML = `<p style="color: var(--danger-color);">Could not start generation process. Check the agent's console.</p>`;
-                        console.error('Error sending approval:', err);
-                    }});
-                return;
-            }}
-
-            const isFeedback = decision === 'feedback';
-            let fetchOptions = {{ method: 'POST' }};
-            let url = `http://localhost:${{port}}/${{decision}}`;
-
-            if (isFeedback) {{
-                const feedback = document.getElementById('feedback-text').value;
-                if (!feedback) {{
-                    alert('Please enter feedback before submitting.');
-                    return;
-                }}
-                url = `http://localhost:${{port}}/feedback`;
-                fetchOptions.headers = {{ 'Content-Type': 'application/json' }};
-                fetchOptions.body = JSON.stringify({{ feedback: feedback }});
-            }}
-
-            fetch(url, fetchOptions)
-                .then(response => response.text())
-                .then(text => {{
-                    const message = isFeedback ? 'The agent is re-analyzing. You can close this tab now.' : text;
-                    const title = isFeedback ? 'Feedback Submitted' : 'Decision Received';
-                    showMessage(title, message);
-                    setTimeout(() => window.close(), 3000);
-                }})
-                .catch(err => {{
-                    showMessage('Error', `Could not contact server while sending '${{decision}}'.`);
-                    console.error(`Error sending ${{decision}}:`, err);
-                }});
-        }}
-
-        function sendFeedback() {{
-            sendDecision('feedback');
-        }}
-    </script>
-</body>
-</html>
-        """
-
-        plan_file_path = os.path.join(self.args.dir, "plan.html")
-        try:
-            with open(plan_file_path, "w", encoding="utf-8") as f:
-                f.write(html_content)
-            logging.info(f"✅ Plan saved to {plan_file_path}")
-            return plan_file_path
-        except Exception as e:
-            logging.error(f"❌ Could not write the HTML plan: {e}")
-            return ""
-
     def _execute_generation_loop(self, analysis: CodeAnalysis, all_repo_files: List[str], app_desc_content: str) -> List[str]:
         """
         Manages the iterative process of generating code, handling context, and re-analyzing on failure.
@@ -878,7 +405,8 @@ class CliManager:
                 
                 generated_code = self.ai_agent.generate_file_content(
                     self.args.task, context_str, file_path, all_repo_files,
-                    remaining_order, context_data.get(file_path), strict=self.args.strict
+                    remaining_order, context_data.get(file_path), strict=self.args.strict,
+                    use_flash_model=analysis.use_flash_model
                 )
 
                 if generated_code.requires_more_context:
@@ -891,7 +419,12 @@ class CliManager:
                 # Success case
                 write_file_content(self.args.dir, file_path, generated_code.code)
                 if self.status_queue:
-                    self.status_queue.put({"status": "done", "file_path": file_path, "code": generated_code.code})
+                    self.status_queue.put({
+                        "status": "done",
+                        "file_path": file_path,
+                        "summary": generated_code.summary,
+                        "reasoning": generated_code.reasoning,
+                    })
 
                 context_data[file_path] = generated_code.code  # Update context for next file in this loop
                 processed_in_loop.append(file_path)
@@ -979,8 +512,9 @@ class CliManager:
                 return
 
             logging.info("✅ Analysis complete. Awaiting user confirmation in browser.")
-            plan_html_path = self._create_and_open_plan_html(analysis)
+            plan_html_path = create_code_plan_html(analysis, self.args.task, self.args.port)
             if not plan_html_path:
+                logging.error("Failed to create the HTML plan file.")
                 return
             
             if not analysis.generation_order:
@@ -1013,6 +547,12 @@ class CliManager:
 
                 if decision == 'approve':
                     logging.info("✅ Plan approved by user. Proceeding with code generation.")
+                    # Handle model override from user
+                    if data and isinstance(data, dict) and 'use_flash_model' in data:
+                        override_value = data.get('use_flash_model', False)
+                        if analysis.use_flash_model != override_value:
+                            analysis.use_flash_model = override_value
+                            logging.info(f"Model selection overridden by user. 'Use Gemini Flash' is now set to: {analysis.use_flash_model}")
                     break
                 elif decision == 'reject':
                     logging.info("❌ Plan rejected by user. Operation cancelled.")

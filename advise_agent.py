@@ -7,11 +7,11 @@ import subprocess
 import webbrowser
 from typing import Callable, Dict, List, Optional
 
-import markdown
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
 from pydantic_ai.models.google import GoogleModelSettings
 
+from html_utils import create_advice_analysis_html, create_advice_html
 from shared_agents_utils import (
     AgentTools,
     BaseAiAgent,
@@ -200,212 +200,6 @@ Based on this context, please provide your advice.
 class CliManager:
     """Manages CLI interactions and orchestrates the advice generation process."""
 
-    _COMMON_STYLE = """
-<style>
-    :root {
-        --primary-color: #4a90e2;
-        --secondary-color: #50e3c2;
-        --background-color: #f4f7f9;
-        --container-bg-color: #ffffff;
-        --text-color: #333;
-        --heading-color: #1a2533;
-        --border-color: #e0e6ed;
-        --code-bg-color: #2d2d2d;
-        --code-text-color: #f8f8f2;
-        --inline-code-bg: #eef2f5;
-        --inline-code-text: #d6336c;
-        --success-color: #2ecc71;
-        --danger-color: #e74c3c;
-        --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
-    }
-
-    body {
-        font-family: var(--font-family);
-        line-height: 1.7;
-        padding: 2rem;
-        background-color: var(--background-color);
-        color: var(--text-color);
-        margin: 0;
-    }
-
-    .main-container {
-        max-width: 1100px;
-        margin: auto;
-    }
-
-    h1, h2, h3 {
-        color: var(--heading-color);
-        font-weight: 700;
-        margin-top: 2rem;
-        margin-bottom: 1rem;
-    }
-
-    h1 {
-        text-align: center;
-        font-size: 2.8em;
-        margin-bottom: 2rem;
-        background: linear-gradient(45deg, var(--primary-color), var(--secondary-color));
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        background-clip: text;
-    }
-
-    h2 {
-        font-size: 1.8em;
-        border-bottom: 3px solid var(--primary-color);
-        padding-bottom: 0.5rem;
-    }
-
-    .container {
-        background-color: var(--container-bg-color);
-        border: 1px solid var(--border-color);
-        padding: 2rem;
-        margin-bottom: 1.5rem;
-        border-radius: 12px;
-        box-shadow: 0 8px 24px rgba(26, 37, 51, 0.07);
-        transition: transform 0.2s ease-in-out, box-shadow 0.2s ease-in-out;
-    }
-
-    .container:hover {
-        transform: translateY(-3px);
-        box-shadow: 0 12px 32px rgba(26, 37, 51, 0.1);
-    }
-
-    ul, ol {
-        padding-left: 2rem;
-    }
-
-    li {
-        margin-bottom: 0.75rem;
-    }
-
-    code {
-        background-color: var(--inline-code-bg);
-        color: var(--inline-code-text);
-        padding: 0.2em 0.4em;
-        margin: 0;
-        font-size: 85%;
-        border-radius: 6px;
-        font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
-    }
-
-    pre {
-        background-color: var(--code-bg-color);
-        color: var(--code-text-color);
-        padding: 1.5rem;
-        border-radius: 8px;
-        overflow-x: auto;
-        white-space: pre-wrap;
-        word-wrap: break-word;
-    }
-
-    pre code {
-        background-color: transparent;
-        color: inherit;
-        padding: 0;
-        margin: 0;
-        font-size: inherit;
-        border-radius: 0;
-    }
-
-    blockquote {
-        border-left: 5px solid var(--primary-color);
-        padding-left: 1.5rem;
-        color: #555;
-        margin-left: 0;
-        font-style: italic;
-    }
-
-    table {
-        width: 100%;
-        border-collapse: collapse;
-        margin-top: 1.5rem;
-        box-shadow: 0 4px 8px rgba(0,0,0,0.05);
-        border-radius: 8px;
-        overflow: hidden;
-    }
-
-    th, td {
-        border: 1px solid var(--border-color);
-        padding: 0.8rem 1rem;
-        text-align: left;
-    }
-
-    th {
-        background-color: var(--primary-color);
-        color: white;
-        font-weight: 500;
-    }
-
-    tr:nth-child(even) {
-        background-color: #f9fafb;
-    }
-
-    .actions {
-        text-align: center;
-        margin-top: 2rem;
-        padding-top: 2rem;
-        border-top: 1px solid var(--border-color);
-    }
-
-    .actions button {
-        color: white;
-        border: none;
-        padding: 1rem 2rem;
-        font-size: 1rem;
-        font-weight: 500;
-        border-radius: 8px;
-        cursor: pointer;
-        margin: 0.5rem;
-        transition: all 0.3s ease;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
-    }
-
-    .actions button:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 6px 16px rgba(0,0,0,0.15);
-    }
-
-    .approve-btn { background-color: var(--primary-color); }
-    .approve-btn:hover { background-color: #3a82d2; }
-
-    .reject-btn { background-color: var(--danger-color); }
-    .reject-btn:hover { background-color: #c0392b; }
-
-    .feedback-btn { background-color: var(--success-color); }
-    .feedback-btn:hover { background-color: #27ae60; }
-
-    .feedback-form {
-        margin-top: 2rem;
-        background-color: #fdfdfe;
-        padding: 1.5rem;
-        border-radius: 8px;
-        border: 1px solid var(--border-color);
-        text-align: left;
-    }
-
-    .feedback-form h3 {
-        margin-top: 0;
-        color: var(--heading-color);
-        font-size: 1.2em;
-    }
-
-    .feedback-form textarea {
-        width: calc(100% - 2rem);
-        min-height: 100px;
-        padding: 1rem;
-        border-radius: 8px;
-        border: 1px solid var(--border-color);
-        margin-bottom: 1rem;
-        font-family: var(--font-family);
-        font-size: 1rem;
-        resize: vertical;
-    }
-</style>
-"""
-
     def __init__(self):
         """Initializes the CLI manager and the AI advise agent."""
         self.ai_agent = AiAdviseAgent()
@@ -453,169 +247,6 @@ class CliManager:
         except Exception as e:
             logging.warning(f"Could not get untracked git files: {e}. Proceeding with tracked files only.")
             return git_files
-
-    def _create_and_open_analysis_html(self, analysis: AdviceAnalysis) -> str:
-        """Generates an HTML report for the analysis and returns the file path."""
-        if not analysis:
-            return ""
-
-        html_content = f"""
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Advice Generation Plan</title>
-    {self._COMMON_STYLE}
-</head>
-<body>
-    <div id="main-content" class="main-container">
-        <h1>🤖 AI Advice Generation Plan</h1>
-
-        <div class="container">
-            <h2>Your Question</h2>
-            <p>{self.args.task}</p>
-        </div>
-
-        <div class="container">
-            <h2>High-level Plan for Advice</h2>
-            <ol>
-                {''.join([f'<li>{step}</li>' for step in analysis.plan_for_advice]) if analysis.plan_for_advice else "<li>No plan provided.</li>"}
-            </ol>
-        </div>
-
-        <div class="container">
-            <h2>Overall Reasoning</h2>
-            <p>{analysis.reasoning or "No reasoning provided."}</p>
-        </div>
-
-        <div class="container">
-            <h2>Relevant Files for Context</h2>
-            <ul>
-                {''.join([f'<li><code>{file}</code></li>' for file in analysis.relevant_files]) if analysis.relevant_files else "<li>None</li>"}
-            </ul>
-        </div>
-
-        <div class="container actions">
-            <h2>Confirm Plan</h2>
-            <p>Do you want to proceed with generating the advice based on this plan?</p>
-            <button class="approve-btn" onclick="sendDecision('approve')">Approve & Generate Advice</button>
-            <button class="reject-btn" onclick="sendDecision('reject')">Reject</button>
-            <div class="feedback-form">
-                <h3>Refine the Plan</h3>
-                <p>If the plan isn't quite right, provide feedback below and submit it for a new plan.</p>
-                <textarea id="feedback-text" placeholder="e.g., 'Please also consider file X' or 'The plan seems to miss the point about Y'"></textarea>
-                <br>
-                <button class="feedback-btn" onclick="sendFeedback()">Submit Feedback</button>
-            </div>
-        </div>
-    </div>
-
-    <script>
-        const port = {self.args.port};
-        const mainContent = document.getElementById('main-content');
-
-        function showMessage(title, message) {{
-            mainContent.innerHTML = `<div class="container"><h1>${{title}}</h1><p>${{message}}</p></div>`;
-        }}
-
-        function sendDecision(decision) {{
-            fetch(`http://localhost:${{port}}/${{decision}}`, {{ method: 'POST' }})
-                .then(response => response.text())
-                .then(text => {{
-                    showMessage(text, 'You can close this tab now. This window will close automatically in 2 seconds.');
-                    setTimeout(() => window.close(), 2000);
-                }})
-                .catch(err => {{
-                    showMessage('Error', 'Could not contact server. Please check the console.');
-                    console.error('Error sending decision:', err);
-                }});
-        }}
-
-        function sendFeedback() {{
-            const feedback = document.getElementById('feedback-text').value;
-            if (!feedback) {{
-                alert('Please enter feedback before submitting.');
-                return;
-            }}
-            fetch(`http://localhost:${{port}}/feedback`, {{
-                method: 'POST',
-                headers: {{ 'Content-Type': 'application/json' }},
-                body: JSON.stringify({{ feedback: feedback }})
-            }})
-            .then(response => response.text())
-            .then(text => {{
-                showMessage(text, 'The agent is re-analyzing. You can close this tab now. This window will close automatically in 2 seconds.');
-                setTimeout(() => window.close(), 2000);
-            }})
-            .catch(err => {{
-                showMessage('Error', 'Could not contact server. Please check the console.');
-                console.error('Error sending feedback:', err);
-            }});
-        }}
-    </script>
-</body>
-</html>
-        """
-
-        plan_file_path = os.path.join(self.args.dir, "advice_plan.html")
-        try:
-            with open(plan_file_path, "w", encoding="utf-8") as f:
-                f.write(html_content)
-            logging.info(f"✅ Analysis plan saved to {plan_file_path}")
-            return plan_file_path
-        except Exception as e:
-            logging.error(f"❌ Could not write the HTML plan: {e}")
-            return ""
-
-    def _create_and_open_advice_html(self, advice: Advice, analysis: AdviceAnalysis):
-        """Generates an HTML report from the advice and opens it."""
-        
-        response_html = markdown.markdown(advice.response, extensions=['fenced_code', 'tables'])
-
-        html_content = f"""
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI-Generated Advice</title>
-    {self._COMMON_STYLE}
-</head>
-<body>
-    <div class="main-container">
-        <h1>🤖 AI-Generated Advice</h1>
-
-        <div class="container">
-            <h2>Your Question</h2>
-            <p>{self.args.task}</p>
-        </div>
-
-        <div class="container">
-            <h2>Advice</h2>
-            {response_html}
-        </div>
-
-        <div class="container">
-            <h2>References</h2>
-            <p>This advice was formulated based on the following files:</p>
-            <ul>
-                {''.join([f'<li><code>{file}</code></li>' for file in advice.references]) if advice.references else "<li>No specific files were referenced.</li>"}
-            </ul>
-        </div>
-    </div>
-</body>
-</html>
-        """
-
-        advice_file_path = os.path.join(self.args.dir, "advice.html")
-        try:
-            with open(advice_file_path, "w", encoding="utf-8") as f:
-                f.write(html_content)
-            logging.info(f"✅ Advice saved to {advice_file_path}")
-            webbrowser.open(f"file://{os.path.realpath(advice_file_path)}")
-        except Exception as e:
-            logging.error(f"❌ Could not write or open the HTML advice file: {e}")
 
     def run(self):
         """The main entry point for the CLI tool."""
@@ -674,7 +305,7 @@ class CliManager:
 
             # B. Display Analysis and get confirmation
             logging.info("✅ Analysis complete. Awaiting user confirmation in browser.")
-            plan_html_path = self._create_and_open_analysis_html(analysis)
+            plan_html_path = create_advice_analysis_html(analysis, self.args.task, self.args.port)
             if not plan_html_path:
                 return  # Error already logged
 
@@ -728,16 +359,11 @@ class CliManager:
 
         # 5. Display Advice
         logging.info("✅ Advice generated successfully. Opening in web browser.")
-        self._create_and_open_advice_html(advice, analysis)
+        advice_html_path = create_advice_html(advice, self.args.task)
+        if advice_html_path:
+            webbrowser.open(f"file://{os.path.realpath(advice_html_path)}")
 
 
 if __name__ == "__main__":
-    # The markdown library is an optional dependency for displaying the report.
-    try:
-        import markdown
-    except ImportError:
-        print("Please install the 'markdown' library for HTML report generation: pip install markdown")
-        exit(1)
-        
     cli = CliManager()
     cli.run()
