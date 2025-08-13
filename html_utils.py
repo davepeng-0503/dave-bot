@@ -290,6 +290,74 @@ COMMON_STYLE = """
         font-weight: 500;
         font-size: 0.9em;
     }
+
+    /* --- Timeline Styles --- */
+    .timeline {
+        position: relative;
+        max-width: 900px;
+        margin: 2rem auto;
+        padding: 2rem 0;
+    }
+
+    .timeline::after {
+        content: '';
+        position: absolute;
+        width: 4px;
+        background-color: var(--primary-color);
+        top: 0;
+        bottom: 0;
+        left: 50%;
+        margin-left: -2px;
+        border-radius: 2px;
+    }
+
+    .timeline-item {
+        padding: 10px 40px;
+        position: relative;
+        background-color: inherit;
+        width: 50%;
+    }
+
+    .timeline-item.left {
+        left: 0;
+    }
+
+    .timeline-item.right {
+        left: 50%;
+    }
+
+    .timeline-item::after {
+        content: '';
+        position: absolute;
+        width: 20px;
+        height: 20px;
+        right: -11px;
+        background-color: white;
+        border: 4px solid var(--primary-color);
+        top: 25px;
+        border-radius: 50%;
+        z-index: 1;
+    }
+
+    .timeline-item.right::after {
+        left: -9px;
+    }
+
+    .timeline-content {
+        padding: 20px 30px;
+        background-color: white;
+        position: relative;
+        border-radius: 8px;
+        border: 1px solid var(--border-color);
+        box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+    }
+    .timeline-content h3 {
+        margin-top: 0;
+        font-size: 1.2em;
+    }
+    .timeline-content code {
+        font-size: 95%;
+    }
 </style>
 """
 
@@ -419,9 +487,10 @@ def create_code_plan_html(analysis: "CodeAnalysis", task: str, port: int) -> Opt
         const mainContent = document.getElementById('main-content');
         const totalFiles = {len(analysis.generation_order) if analysis.generation_order else 0};
         let completedFiles = 0;
-        let progressUpdater = null; // To hold our setInterval ID
+        let progressUpdater = null;
         let currentFileStartTime = null;
         const estimatedTimePerFile = 180; // 3 minutes in seconds
+        let timelineItemCounter = 0;
 
         function escapeHtml(unsafe) {{
             if (typeof unsafe !== 'string') {{
@@ -441,20 +510,11 @@ def create_code_plan_html(analysis: "CodeAnalysis", task: str, port: int) -> Opt
 
         function updateProgressBar() {{
             if (!currentFileStartTime) return;
-
             const elapsedTime = (Date.now() - currentFileStartTime) / 1000;
-            
-            // Progress of the current file (from 0.0 to 1.0), capped at 1.0.
-            // This represents how much of the *time slot* for the current file has been used.
             const currentFileTimeProgress = Math.min(1.0, elapsedTime / estimatedTimePerFile);
-
-            // Overall progress is based on completed files plus the progress of the current file's time slot.
             const completedProgress = (completedFiles / totalFiles);
             const currentProgress = (currentFileTimeProgress / totalFiles);
-            
-            // We cap the total at 99% until the very end, to leave room for the final "finished" state.
             const totalPercentage = Math.min(99, Math.floor((completedProgress + currentProgress) * 100));
-
             const progressBar = document.getElementById('generation-progress-bar');
             if (progressBar) {{
                 progressBar.style.width = `${{totalPercentage}}%`;
@@ -466,7 +526,7 @@ def create_code_plan_html(analysis: "CodeAnalysis", task: str, port: int) -> Opt
             fetch(`http://localhost:${{port}}/status`)
                 .then(response => {{
                     if (response.status === 204) {{
-                        setTimeout(pollStatus, 1000); // Poll again
+                        setTimeout(pollStatus, 1000);
                         return null;
                     }}
                     if (!response.ok) throw new Error(`HTTP error! status: ${{response.status}}`);
@@ -478,36 +538,38 @@ def create_code_plan_html(analysis: "CodeAnalysis", task: str, port: int) -> Opt
                     const logContainer = document.getElementById('generation-log');
                     if (!logContainer) return;
 
-                    if (logContainer.querySelector('p')?.textContent.includes('Waiting for generation')) {{
+                    if (timelineItemCounter === 0 && logContainer.querySelector('.placeholder')) {{
                         logContainer.innerHTML = '';
                     }}
 
                     if (data.status === 'writing') {{
-                        // Stop any previous timer just in case.
                         if (progressUpdater) clearInterval(progressUpdater);
-
-                        // Record start time and start the new timer.
                         currentFileStartTime = Date.now();
                         progressUpdater = setInterval(updateProgressBar, 1000);
 
-                        const writingElement = document.createElement('p');
-                        const elementId = `writing-${{data.file_path.replace(/[^a-zA-Z0-9]/g, '-')}}`;
-                        writingElement.id = elementId;
-                        writingElement.innerHTML = `⏳ Writing file: <code>${{data.file_path}}</code>...`;
-                        logContainer.appendChild(writingElement);
+                        const side = timelineItemCounter % 2 === 0 ? 'left' : 'right';
+                        const elementId = `item-${{data.file_path.replace(/[^a-zA-Z0-9]/g, '-')}}`;
+                        
+                        const timelineItem = document.createElement('div');
+                        timelineItem.id = elementId;
+                        timelineItem.className = `timeline-item ${{side}}`;
+                        timelineItem.innerHTML = `
+                            <div class="timeline-content">
+                                <h3>⏳ Generating File...</h3>
+                                <code>${{escapeHtml(data.file_path)}}</code>
+                            </div>
+                        `;
+                        logContainer.appendChild(timelineItem);
+                        timelineItemCounter++;
 
                     }} else if (data.status === 'done') {{
-                        // Stop the timer for the completed file.
                         if (progressUpdater) {{
                             clearInterval(progressUpdater);
                             progressUpdater = null;
                         }}
                         currentFileStartTime = null;
-
                         completedFiles++;
                         
-                        // Set the progress bar to the solid new base.
-                        // This handles the "speed up" case where a file finishes early.
                         const percentage = totalFiles > 0 ? Math.round((completedFiles / totalFiles) * 100) : 0;
                         const progressBar = document.getElementById('generation-progress-bar');
                         if (progressBar) {{
@@ -515,30 +577,23 @@ def create_code_plan_html(analysis: "CodeAnalysis", task: str, port: int) -> Opt
                             progressBar.textContent = `${{percentage}}% Complete`;
                         }}
 
-                        const elementId = `writing-${{data.file_path.replace(/[^a-zA-Z0-9]/g, '-')}}`;
-                        const writingElement = document.getElementById(elementId);
-                        if (writingElement) {{
-                            writingElement.remove();
+                        const elementId = `item-${{data.file_path.replace(/[^a-zA-Z0-9]/g, '-')}}`;
+                        const timelineItem = document.getElementById(elementId);
+                        
+                        if (timelineItem) {{
+                            timelineItem.innerHTML = `
+                                <div class="timeline-content">
+                                    <h3>✅ File Complete: <code>${{escapeHtml(data.file_path)}}</code></h3>
+                                    <h4>Summary of Changes</h4>
+                                    <p>${{escapeHtml(data.summary || 'No summary provided.')}}</p>
+                                    <h4>Reasoning for Changes</h4>
+                                    <blockquote>${{escapeHtml(data.reasoning || 'No reasoning provided.')}}</blockquote>
+                                </div>
+                            `;
                         }}
-
-                        const doneElement = document.createElement('div');
-                        doneElement.className = 'container file-generation-result';
-                        doneElement.style.marginBottom = '1.5rem';
-                        doneElement.innerHTML = `
-                            <h3>File: <code>${{data.file_path}}</code></h3>
-                            <h4>Summary of Changes</h4>
-                            <p>${{escapeHtml(data.summary || 'No summary provided.')}}</p>
-                            <h4>Reasoning for Changes</h4>
-                            <blockquote>${{escapeHtml(data.reasoning || 'No reasoning provided.')}}</blockquote>
-                        `;
-                        logContainer.appendChild(doneElement);
 
                     }} else if (data.status === 'finished') {{
-                        // Stop any running timer.
-                        if (progressUpdater) {{
-                            clearInterval(progressUpdater);
-                            progressUpdater = null;
-                        }}
+                        if (progressUpdater) clearInterval(progressUpdater);
                         currentFileStartTime = null;
 
                         const progressBar = document.getElementById('generation-progress-bar');
@@ -546,17 +601,23 @@ def create_code_plan_html(analysis: "CodeAnalysis", task: str, port: int) -> Opt
                             progressBar.style.width = '100%';
                             progressBar.textContent = '100% Complete';
                         }}
-                        const finishedElement = document.createElement('p');
-                        finishedElement.style.marginTop = '1rem';
-                        finishedElement.style.color = 'var(--success-color)';
-                        finishedElement.innerHTML = '✅ All files generated successfully! You can close this window.';
-                        logContainer.appendChild(finishedElement);
+
+                        const side = timelineItemCounter % 2 === 0 ? 'left' : 'right';
+                        const finishedItem = document.createElement('div');
+                        finishedItem.className = `timeline-item ${{side}}`;
+                        finishedItem.innerHTML = `
+                            <div class="timeline-content" style="background-color: var(--success-color); color: white;">
+                                <h3>🎉 Process Finished!</h3>
+                                <p>All files generated successfully. You can now close this window.</p>
+                            </div>
+                        `;
+                        logContainer.appendChild(finishedItem);
                         return; // Stop polling
                     }}
                     setTimeout(pollStatus, 500);
                 }})
                 .catch(err => {{
-                    if (progressUpdater) clearInterval(progressUpdater); // Stop timer on error
+                    if (progressUpdater) clearInterval(progressUpdater);
                     const logContainer = document.getElementById('generation-log');
                     if (logContainer) {{
                         logContainer.innerHTML += `<p style="color: var(--danger-color);">Connection to server lost. Please check the agent's console output.</p>`;
@@ -566,8 +627,6 @@ def create_code_plan_html(analysis: "CodeAnalysis", task: str, port: int) -> Opt
         }}
 
         function sendDecision(decision) {{
-            const actionsContainer = document.getElementById('actions-container');
-
             if (decision === 'approve') {{
                 const generationContainer = document.createElement('div');
                 generationContainer.className = 'container';
@@ -576,12 +635,18 @@ def create_code_plan_html(analysis: "CodeAnalysis", task: str, port: int) -> Opt
                     <div class="progress-bar-container">
                         <div class="progress-bar" id="generation-progress-bar" style="width: 0%;">0%</div>
                     </div>
-                    <div id="generation-log">
-                        <p>Waiting for generation to start...</p>
+                    <div id="generation-log" class="timeline">
+                         <div class="timeline-item left placeholder">
+                            <div class="timeline-content">
+                                <h3>🚀 Process Started</h3>
+                                <p>Waiting for the agent to begin generating files...</p>
+                            </div>
+                        </div>
                     </div>
                 `;
                 
                 const useFlash = document.getElementById('use-flash-model').checked;
+                const actionsContainer = document.getElementById('actions-container');
                 if (actionsContainer) {{
                     actionsContainer.parentNode.replaceChild(generationContainer, actionsContainer);
                 }} else {{

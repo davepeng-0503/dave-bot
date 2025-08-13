@@ -8,6 +8,7 @@ import http.server
 import json
 import logging
 import os
+import queue
 import socketserver
 import subprocess
 import threading
@@ -139,14 +140,16 @@ class ReadFileContentInput(BaseModel):
 class AgentTools:
     """A class to provide tools to AI agents, with a fixed project directory."""
 
-    def __init__(self, directory: str):
+    def __init__(self, directory: str, status_queue: Optional[queue.Queue[Dict[str, Any]]] = None):
         """
         Initializes the tools with the project's base directory.
 
         Args:
             directory: The absolute path to the project's root directory.
+            status_queue: An optional queue to report tool usage status.
         """
         self.directory = directory
+        self.status_queue = status_queue
 
     def git_grep_search(self, query: str) -> str:
         """
@@ -154,6 +157,12 @@ class AgentTools:
         This function is intended to be used as a tool by AI agents.
         """
         logging.info(f"🛠️ Running git grep search for: '{query}' in '{self.directory}'")
+        if self.status_queue:
+            self.status_queue.put({
+                "status": "tool_call",
+                "tool_name": "git_grep_search",
+                "tool_input": query,
+            })
         try:
             result = subprocess.run(
                 ['git', 'grep', '-i', '-n', query],
@@ -184,6 +193,12 @@ class AgentTools:
         This is a tool for an AI agent.
         """
         logging.info(f"Agent tool reading file: {file_path}")
+        if self.status_queue:
+            self.status_queue.put({
+                "status": "tool_call",
+                "tool_name": "read_file",
+                "tool_input": file_path,
+            })
         content = read_file_content(self.directory, file_path)
         if content is None:
             # read_file_content already logs the specific error
@@ -371,16 +386,16 @@ class ApprovalWebServer(socketserver.TCPServer):
         self.html_file_path = html_file_path
         self.decision_made = threading.Event()
         self.user_decision: Optional[str] = None
-        self.user_data: Optional[str] = None
+        self.user_data: Optional[Any] = None
 
-    def set_decision(self, decision: str, data: Optional[str] = None):
+    def set_decision(self, decision: str, data: Optional[Any] = None):
         """Called by the handler to record the user's decision."""
         if not self.decision_made.is_set():
             self.user_decision = decision
             self.user_data = data
             self.decision_made.set()
 
-    def wait_for_decision(self) -> Tuple[Optional[str], Optional[str]]:
+    def wait_for_decision(self) -> Tuple[Optional[str], Optional[Any]]:
         """Blocks until a decision is made and returns it."""
         self.decision_made.wait()
         return self.user_decision, self.user_data
@@ -429,17 +444,22 @@ class ApprovalHandler(http.server.BaseHTTPRequestHandler):
             post_data = self.rfile.read(content_length)
 
             action = self.path.lstrip("/")
-            data = None
+            data: Optional[Any] = None
 
-            if action == "feedback":
+            if post_data:
                 try:
-                    payload = json.loads(post_data)
-                    data = payload.get("feedback", "")
+                    data = json.loads(post_data)
                 except json.JSONDecodeError:
                     self._send_response(400, "text/plain", b"Invalid JSON")
                     return
+            
+            # For feedback, the data is the whole payload. For approve, it might contain overrides.
+            if action == "feedback":
+                decision_data = data.get("feedback", "") if isinstance(data, dict) else str(data)
+            else:
+                decision_data = data
 
-            self.server.set_decision(action, data)
+            self.server.set_decision(action, decision_data)
 
             success_message = (
                 f"Decision '{action}' received. You can close this window."
@@ -461,7 +481,7 @@ class ApprovalHandler(http.server.BaseHTTPRequestHandler):
 
 def wait_for_user_approval_from_browser(
     html_file_path: str, port: int
-) -> Tuple[Optional[str], Optional[str]]:
+) -> Tuple[Optional[str], Optional[Any]]:
     """
     Starts a local web server to display an HTML file and waits for user interaction.
 
@@ -476,7 +496,7 @@ def wait_for_user_approval_from_browser(
 
     Returns:
         A tuple containing the action (e.g., 'approve', 'reject', 'feedback')
-        and optional data (the feedback text).
+        and optional data (the feedback text or other payload).
     """
     server = None
     # We need to bind the html_file_path to the handler.

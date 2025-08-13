@@ -8,7 +8,7 @@ import subprocess
 import threading
 import time
 import webbrowser
-from typing import Callable, Any, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
@@ -260,14 +260,15 @@ Original content of `{file_path}`:
 class CliManager:
     """Manages CLI interactions, file I/O, and orchestrates the analysis and code generation."""
 
-    status_queue: Optional[queue.Queue[Dict[str, Any]]]
+    status_queue: queue.Queue[Dict[str, Any]]
     
     def __init__(self):
         """Initializes the CLI manager and the AI code agent."""
         self.ai_agent = AiCodeAgent()
         self.args = self._parse_args()
-        self.agent_tools = AgentTools(self.args.dir)
-        self.status_queue:  Optional[queue.Queue[Dict[str, Any]]] = None
+        self.status_queue = queue.Queue()
+        # Pass the queue to AgentTools to capture tool usage during analysis
+        self.agent_tools = AgentTools(self.args.dir, status_queue=self.status_queue)
 
     def _parse_args(self) -> argparse.Namespace:
         """Parses command-line arguments."""
@@ -499,8 +500,7 @@ class CliManager:
             reanalysis_needed = False
 
             for file_path in files_to_process:
-                if self.status_queue:
-                    self.status_queue.put({"status": "writing", "file_path": file_path})
+                self.status_queue.put({"status": "writing", "file_path": file_path})
 
                 remaining_order = [f for f in files_to_process if f not in processed_in_loop]
                 context_str = build_context_from_dict(context_data, self.ai_agent.summarize_code, exclude_file=file_path)
@@ -520,13 +520,12 @@ class CliManager:
 
                 # Success case
                 write_file_content(self.args.dir, file_path, generated_code.code)
-                if self.status_queue:
-                    self.status_queue.put({
-                        "status": "done",
-                        "file_path": file_path,
-                        "summary": generated_code.summary,
-                        "reasoning": generated_code.reasoning,
-                    })
+                self.status_queue.put({
+                    "status": "done",
+                    "file_path": file_path,
+                    "summary": generated_code.summary,
+                    "reasoning": generated_code.reasoning,
+                })
 
                 context_data[file_path] = generated_code.code  # Update context for next file in this loop
                 processed_in_loop.append(file_path)
@@ -639,7 +638,6 @@ class CliManager:
                             super().do_GET()
 
                 server = ApprovalWebServer(('', self.args.port), StatusAwareApprovalHandler, html_file_path=os.path.realpath(plan_html_path))
-                self.status_queue = queue.Queue()
                 server_thread = threading.Thread(target=server.serve_forever)
                 server_thread.daemon = True
                 server_thread.start()
