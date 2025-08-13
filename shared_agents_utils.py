@@ -459,14 +459,10 @@ class ApprovalHandler(http.server.BaseHTTPRequestHandler):
                 except json.JSONDecodeError:
                     self._send_response(400, "text/plain", b"Invalid JSON")
                     return
-            
-            # For feedback, the data is the whole payload. For approve, it might contain overrides.
-            if action == "feedback":
-                decision_data = data.get("feedback", "") if isinstance(data, dict) else str(data)
-            else:
-                decision_data = data
 
-            self.server.set_decision(action, decision_data)
+            # The payload for 'approve' and 'feedback' is a JSON object.
+            # For 'reject', it's empty. In all cases, we pass the data object as is.
+            self.server.set_decision(action, data)
 
             success_message = (
                 f"Decision '{action}' received. You can close this window."

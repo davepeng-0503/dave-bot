@@ -6,9 +6,10 @@ This module centralizes the creation of HTML pages used by different agents
 to display plans, gather feedback, and show results.
 """
 
+import json
 import logging
 import tempfile
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 import markdown
 
@@ -16,6 +17,7 @@ import markdown
 # The agent files will import this module, and this module needs type hints from them.
 if TYPE_CHECKING:
     from advise_agent import Advice, AdviceAnalysis
+    from code_agent import CodeAnalysis
 
 
 # --- Shared HTML Components ---
@@ -353,13 +355,53 @@ COMMON_STYLE = """
         background-color: #fff1f0;
         border-left: 4px solid #ff4d4f;
     }
+
+    /* --- Autocomplete Styles --- */
+    .autocomplete-container {
+        position: relative;
+        margin-top: 1.5rem;
+        margin-bottom: 1rem;
+    }
+    .autocomplete-container input {
+        width: calc(100% - 2rem);
+        padding: 0.75rem 1rem;
+        font-size: 1rem;
+        border: 1px solid var(--border-color);
+        border-radius: 8px;
+    }
+    .autocomplete-items {
+        position: absolute;
+        border: 1px solid var(--border-color);
+        border-top: none;
+        z-index: 99;
+        top: 100%;
+        left: 0;
+        right: 0;
+        background-color: white;
+        max-height: 200px;
+        overflow-y: auto;
+        box-shadow: 0 8px 16px rgba(0,0,0,0.1);
+        border-radius: 0 0 8px 8px;
+    }
+    .autocomplete-items div {
+        padding: 10px;
+        cursor: pointer;
+        background-color: #fff;
+        border-bottom: 1px solid #d4d4d4;
+    }
+    .autocomplete-items div:last-child {
+        border-bottom: none;
+    }
+    .autocomplete-items div:hover {
+        background-color: #e9e9e9;
+    }
 </style>
 """
 
 # --- Code Agent HTML Generation ---
 
 
-def create_code_agent_html_viewer(port: int) -> Optional[str]:
+def create_code_agent_html_viewer(port: int, all_repo_files: List[str]) -> Optional[str]:
     """Generates a dynamic HTML viewer for the code agent lifecycle."""
 
     html_content = f"""
@@ -392,6 +434,7 @@ def create_code_agent_html_viewer(port: int) -> Optional[str]:
 
     <script>
         const port = {port};
+        const allRepoFiles = {json.dumps(all_repo_files)};
         const mainContainer = document.getElementById('main-container');
         
         let state = {{
@@ -403,6 +446,7 @@ def create_code_agent_html_viewer(port: int) -> Optional[str]:
             timelineItemCounter: 0,
             pollingActive: false,
             progressAnimationTimer: null,
+            additionalContextFiles: [],
         }};
 
         // UTILITY FUNCTIONS
@@ -446,6 +490,7 @@ def create_code_agent_html_viewer(port: int) -> Optional[str]:
         // RENDER FUNCTIONS
         function renderPlanningView(message = 'Analyzing your request...') {{
             state.timelineItemCounter = 0;
+            state.additionalContextFiles = []; // Reset for new plan
             mainContainer.innerHTML = `
                 <div id="planning-view" class="view active">
                     <div class="container">
@@ -518,7 +563,15 @@ def create_code_agent_html_viewer(port: int) -> Optional[str]:
                 <div class="container">
                     <h2>File Breakdown</h2>
                     <h3>Relevant Files for Context</h3>
-                    <ul>${{plan.relevant_files.length > 0 ? plan.relevant_files.map(f => `<li><code>${{escapeHtml(f)}}</code></li>`).join('') : "<li>None</li>"}}</ul>
+                    <p>These files were identified by the AI as important for understanding the task. You can add more files below.</p>
+                    <ul id="relevant-files-list">${{plan.relevant_files.length > 0 ? plan.relevant_files.map(f => `<li><code>${{escapeHtml(f)}}</code></li>`).join('') : "<li>None</li>"}}</ul>
+                    
+                    <div class="autocomplete-container">
+                        <h4>Add more files to context:</h4>
+                        <input type="text" id="file-search" placeholder="Search for files to add to context...">
+                        <div id="autocomplete-results" class="autocomplete-items"></div>
+                    </div>
+
                     <h3>Files to Edit</h3>
                     <ul>${{plan.files_to_edit.length > 0 ? plan.files_to_edit.map(f => `<li><code>${{escapeHtml(f)}}</code></li>`).join('') : "<li>None</li>"}}</ul>
                     <h3>Files to Create</h3>
@@ -547,6 +600,7 @@ def create_code_agent_html_viewer(port: int) -> Optional[str]:
                 </div>
             </div>
             `;
+            setupFileAutocomplete();
         }}
 
         function renderGenerationView() {{
@@ -609,6 +663,60 @@ def create_code_agent_html_viewer(port: int) -> Optional[str]:
                     <h1 style="${{isError ? 'color: var(--danger-color);' : ''}}">${{escapeHtml(title)}}</h1>
                     <p>${{escapeHtml(message)}}</p>
                 </div>`;
+        }}
+
+        // --- Autocomplete and Context Management ---
+        function setupFileAutocomplete() {{
+            const searchInput = document.getElementById('file-search');
+            const resultsContainer = document.getElementById('autocomplete-results');
+            if (!searchInput) return;
+
+            searchInput.addEventListener('input', function(e) {{
+                const value = this.value;
+                resultsContainer.innerHTML = '';
+                if (!value) return;
+
+                const suggestions = allRepoFiles.filter(file => 
+                    file.toLowerCase().includes(value.toLowerCase()) &&
+                    !state.plan.relevant_files.includes(file) // Don't suggest files already in context
+                );
+
+                suggestions.slice(0, 10).forEach(file => {{ // Show max 10 suggestions
+                    const item = document.createElement('div');
+                    item.innerHTML = file.replace(new RegExp(escapeHtml(value), "gi"), (match) => `<strong>${{match}}</strong>`);
+                    item.addEventListener('click', function() {{
+                        addFileToContext(file);
+                        searchInput.value = '';
+                        resultsContainer.innerHTML = '';
+                    }});
+                    resultsContainer.appendChild(item);
+                }});
+            }});
+
+            // Close dropdown when clicking outside
+            document.addEventListener('click', function (e) {{
+                if (e.target !== searchInput) {{
+                    resultsContainer.innerHTML = '';
+                }}
+            }});
+        }}
+
+        function addFileToContext(file) {{
+            if (!state.plan.relevant_files.includes(file)) {{
+                state.plan.relevant_files.push(file);
+                state.additionalContextFiles.push(file); // Keep track of user-added files
+                
+                // Re-render the list
+                const listElement = document.getElementById('relevant-files-list');
+                if (listElement) {{
+                    if (listElement.querySelector('li') && listElement.querySelector('li').textContent === 'None') {{
+                        listElement.innerHTML = ''; // Clear "None" message
+                    }}
+                    const li = document.createElement('li');
+                    li.innerHTML = `<code>${{escapeHtml(file)}}</code>`;
+                    listElement.appendChild(li);
+                }}
+            }}
         }}
 
         // STATUS POLLING AND EVENT HANDLING
@@ -803,11 +911,15 @@ def create_code_agent_html_viewer(port: int) -> Optional[str]:
                 const useFlash = document.getElementById('use-flash-model').checked;
                 renderGenerationView();
                 
+                const payload = {{
+                    use_flash_model: useFlash,
+                    additional_context_files: state.additionalContextFiles
+                }};
                 
                 fetch(`http://localhost:${{port}}/approve`, {{
                     method: 'POST',
                     headers: {{ 'Content-Type': 'application/json' }},
-                    body: JSON.stringify({{ use_flash_model: useFlash }})
+                    body: JSON.stringify(payload)
                 }}).catch(err => {{
                     showMessage('Error', "Could not start generation process. Check the agent's console.", true);
                     console.error('Error sending approval:', err);
@@ -837,10 +949,15 @@ def create_code_agent_html_viewer(port: int) -> Optional[str]:
             }}
             
             renderPlanningView();
+            const payload = {{
+                feedback: feedback,
+                additional_context_files: state.additionalContextFiles
+            }};
+
             fetch(`http://localhost:${{port}}/feedback`, {{
                 method: 'POST',
                 headers: {{ 'Content-Type': 'application/json' }},
-                body: JSON.stringify({{ feedback: feedback }})
+                body: JSON.stringify(payload)
             }})
             .then(res => {{
                 if (!res.ok) throw new Error('Feedback request failed');
