@@ -3,7 +3,10 @@ import argparse
 import json
 import logging
 import os
+import queue
 import subprocess
+import threading
+import time
 import webbrowser
 from typing import Callable, Dict, List, Optional, Set
 
@@ -13,11 +16,12 @@ from pydantic_ai.models.google import GoogleModelSettings
 
 from shared_agents_utils import (
     AgentTools,
+    ApprovalHandler,
+    ApprovalWebServer,
     BaseAiAgent,
     build_context_from_dict,
     get_git_files,
     read_file_content,
-    wait_for_user_approval_from_browser,
     write_file_content,
 )
 
@@ -410,6 +414,13 @@ class CliManager:
         box-shadow: 0 6px 16px rgba(0,0,0,0.15);
     }
 
+    .actions button:disabled {
+        background-color: #bdc3c7;
+        cursor: not-allowed;
+        transform: none;
+        box-shadow: none;
+    }
+
     .approve-btn { background-color: var(--primary-color); }
     .approve-btn:hover { background-color: #3a82d2; }
 
@@ -453,6 +464,7 @@ class CliManager:
         self.ai_agent = AiCodeAgent()
         self.args = self._parse_args()
         self.agent_tools = AgentTools(self.args.dir)
+        self.status_queue: Optional[queue.Queue] = None
 
     def _parse_args(self) -> argparse.Namespace:
         """Parses command-line arguments."""
@@ -628,43 +640,151 @@ class CliManager:
         const port = {self.args.port};
         const mainContent = document.getElementById('main-content');
 
+        function escapeHtml(unsafe) {{
+            return unsafe
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#039;");
+        }}
+
         function showMessage(title, message) {{
             mainContent.innerHTML = `<div class="container"><h1>${{title}}</h1><p>${{message}}</p></div>`;
         }}
 
-        function sendDecision(decision) {{
-            fetch(`http://localhost:${{port}}/${{decision}}`, {{ method: 'POST' }})
-                .then(response => response.text())
-                .then(text => {{
-                    showMessage(text, 'You can close this tab now. This window will close automatically in 2 seconds.');
-                    setTimeout(() => window.close(), 2000);
+        function pollStatus() {{
+            fetch(`http://localhost:${{port}}/status`)
+                .then(response => {{
+                    if (response.status === 204) {{
+                        setTimeout(pollStatus, 1000); // Poll again
+                        return null;
+                    }}
+                    if (!response.ok) throw new Error(`HTTP error! status: ${{response.status}}`);
+                    return response.json();
+                }})
+                .then(data => {{
+                    if (!data) return;
+
+                    const logContainer = document.getElementById('generation-log');
+                    if (!logContainer) return;
+
+                    // Clear "Waiting for generation to start..." message on first update
+                    if (logContainer.querySelector('p')?.textContent.includes('Waiting for generation')) {{
+                        logContainer.innerHTML = '';
+                    }}
+
+                    if (data.status === 'writing') {{
+                        const writingElement = document.createElement('p');
+                        // Create a unique but valid ID for the element
+                        const elementId = `writing-${{data.file_path.replace(/[^a-zA-Z0-9]/g, '-')}}`;
+                        writingElement.id = elementId;
+                        writingElement.innerHTML = `Writing file: <code>${{data.file_path}}</code>...`;
+                        logContainer.appendChild(writingElement);
+
+                    }} else if (data.status === 'done') {{
+                        // Remove the "writing..." message for this file
+                        const elementId = `writing-${{data.file_path.replace(/[^a-zA-Z0-9]/g, '-')}}`;
+                        const writingElement = document.getElementById(elementId);
+                        if (writingElement) {{
+                            writingElement.remove();
+                        }}
+
+                        const doneElement = document.createElement('div');
+                        doneElement.className = 'file-generation-result';
+                        doneElement.style.marginBottom = '1.5rem';
+                        doneElement.innerHTML = `
+                            <h3>Generated File: <code>${{data.file_path}}</code></h3>
+                            <pre><code>${{escapeHtml(data.code)}}</code></pre>
+                        `;
+                        logContainer.appendChild(doneElement);
+
+                    }} else if (data.status === 'finished') {{
+                        const finishedElement = document.createElement('p');
+                        finishedElement.style.marginTop = '1rem';
+                        finishedElement.style.color = 'var(--success-color)';
+                        finishedElement.innerHTML = '✅ All files generated successfully! You can close this window.';
+                        logContainer.appendChild(finishedElement);
+                        return; // Stop polling
+                    }}
+                    setTimeout(pollStatus, 500); // Poll for next update
                 }})
                 .catch(err => {{
-                    showMessage('Error', 'Could not contact server. Please check the console.');
-                    console.error('Error sending decision:', err);
+                    const logContainer = document.getElementById('generation-log');
+                    if (logContainer) {{
+                        logContainer.innerHTML += `<p style="color: var(--danger-color);">Connection to server lost. Please check the agent's console output.</p>`;
+                    }}
+                    console.error('Error polling status:', err);
+                }});
+        }}
+
+        function sendDecision(decision) {{
+            if (decision === 'approve') {{
+                // Disable all action buttons to prevent re-submission
+                document.querySelectorAll('.actions button').forEach(button => button.disabled = true);
+
+                // Create a new container for the generation status and append it
+                const generationContainer = document.createElement('div');
+                generationContainer.className = 'container';
+                generationContainer.innerHTML = `
+                    <h2>⚙️ Code Generation Progress</h2>
+                    <div id="generation-log">
+                        <p>Waiting for generation to start...</p>
+                    </div>
+                `;
+                // Find the actions container and insert the new container before it
+                const actionsContainer = document.querySelector('.actions');
+                if (actionsContainer) {{
+                    actionsContainer.parentNode.insertBefore(generationContainer, actionsContainer);
+                }} else {{
+                    // Fallback if actions container isn't found
+                    mainContent.appendChild(generationContainer);
+                }}
+                
+                fetch(`http://localhost:${{port}}/approve`, {{ method: 'POST' }})
+                    .then(res => {{
+                        if (!res.ok) throw new Error('Approval request failed');
+                        pollStatus();
+                    }})
+                    .catch(err => {{
+                        const log = document.getElementById('generation-log');
+                        if (log) log.innerHTML = `<p style="color: var(--danger-color);">Could not start generation process. Check the agent's console.</p>`;
+                        console.error('Error sending approval:', err);
+                    }});
+                return;
+            }}
+
+            const isFeedback = decision === 'feedback';
+            let fetchOptions = {{ method: 'POST' }};
+            let url = `http://localhost:${{port}}/${{decision}}`;
+
+            if (isFeedback) {{
+                const feedback = document.getElementById('feedback-text').value;
+                if (!feedback) {{
+                    alert('Please enter feedback before submitting.');
+                    return;
+                }}
+                url = `http://localhost:${{port}}/feedback`;
+                fetchOptions.headers = {{ 'Content-Type': 'application/json' }};
+                fetchOptions.body = JSON.stringify({{ feedback: feedback }});
+            }}
+
+            fetch(url, fetchOptions)
+                .then(response => response.text())
+                .then(text => {{
+                    const message = isFeedback ? 'The agent is re-analyzing. You can close this tab now.' : text;
+                    const title = isFeedback ? 'Feedback Submitted' : 'Decision Received';
+                    showMessage(title, message);
+                    setTimeout(() => window.close(), 3000);
+                }})
+                .catch(err => {{
+                    showMessage('Error', `Could not contact server while sending '${{decision}}'.`);
+                    console.error(`Error sending ${{decision}}:`, err);
                 }});
         }}
 
         function sendFeedback() {{
-            const feedback = document.getElementById('feedback-text').value;
-            if (!feedback) {{
-                alert('Please enter feedback before submitting.');
-                return;
-            }}
-            fetch(`http://localhost:${{port}}/feedback`, {{
-                method: 'POST',
-                headers: {{ 'Content-Type': 'application/json' }},
-                body: JSON.stringify({{ feedback: feedback }})
-            }})
-            .then(response => response.text())
-            .then(text => {{
-                showMessage(text, 'The agent is re-analyzing. You can close this tab now. This window will close automatically in 2 seconds.');
-                setTimeout(() => window.close(), 2000);
-            }})
-            .catch(err => {{
-                showMessage('Error', 'Could not contact server. Please check the console.');
-                console.error('Error sending feedback:', err);
-            }});
+            sendDecision('feedback');
         }}
     </script>
 </body>
@@ -712,6 +832,9 @@ class CliManager:
             reanalysis_needed = False
 
             for file_path in files_to_process:
+                if self.status_queue:
+                    self.status_queue.put({"status": "writing", "file_path": file_path})
+
                 remaining_order = [f for f in files_to_process if f not in processed_in_loop]
                 context_str = build_context_from_dict(context_data, self.ai_agent.summarize_code, exclude_file=file_path)
                 
@@ -729,6 +852,9 @@ class CliManager:
 
                 # Success case
                 write_file_content(self.args.dir, file_path, generated_code.code)
+                if self.status_queue:
+                    self.status_queue.put({"status": "done", "file_path": file_path, "code": generated_code.code})
+
                 context_data[file_path] = generated_code.code  # Update context for next file in this loop
                 processed_in_loop.append(file_path)
 
@@ -772,97 +898,110 @@ class CliManager:
         analysis: Optional[CodeAnalysis] = None
         previous_analysis: Optional[CodeAnalysis] = None
         user_feedback: Optional[str] = None
+        server = None
+        server_thread = None
 
         while True:  # This loop handles user feedback on the plan
             # A. Get Analysis
             if user_feedback:
-                # We have feedback, so we re-run the analysis.
-                # The AI is instructed not to ask for grep queries when feedback is provided.
                 logging.info(f"🔁 Re-analyzing plan with user feedback: '{user_feedback}'")
                 analysis = self.ai_agent.get_initial_analysis(
-                    self.args.task,
-                    all_repo_files,
-                    app_desc_content,
-                    feedback=user_feedback,
-                    previous_plan=previous_analysis,
+                    self.args.task, all_repo_files, app_desc_content,
+                    feedback=user_feedback, previous_plan=previous_analysis,
                     git_grep_search_tool=self.agent_tools.git_grep_search,
                     read_file_tool=self.agent_tools.read_file
                 )
-                user_feedback = None  # Reset feedback for the next loop iteration
+                user_feedback = None
             else:
-                # This is the first run, so we might need the grep confidence loop.
                 grep_results = ""
                 analysis_retries = 0
                 while analysis_retries < MAX_ANALYSIS_GREP_RETRIES:
                     current_analysis = self.ai_agent.get_initial_analysis(
-                        self.args.task,
-                        all_repo_files,
-                        app_desc_content,
+                        self.args.task, all_repo_files, app_desc_content,
                         git_grep_search_tool=self.agent_tools.git_grep_search,
                         read_file_tool=self.agent_tools.read_file,
                         grep_results=grep_results or None
                     )
-
                     if current_analysis.additional_grep_queries_needed:
                         analysis_retries += 1
-                        logging.info("🤖 AI has requested more information via git grep to improve its plan. Running queries automatically.")
-
-                        new_results = []
-                        for query in current_analysis.additional_grep_queries_needed:
-                            result = self.agent_tools.git_grep_search(query)
-                            new_results.append(result)
-                        
+                        logging.info("🤖 AI has requested more information via git grep. Running queries...")
+                        new_results = [self.agent_tools.git_grep_search(q) for q in current_analysis.additional_grep_queries_needed]
                         grep_results = "\n\n".join(new_results)
-                        analysis = None  # Not a final analysis
+                        analysis = None
                     else:
                         analysis = current_analysis
-                        break  # We have a final analysis
-
+                        break
                 if not analysis:
-                    logging.error(f"❌ Failed to get a confident analysis from the AI after {MAX_ANALYSIS_GREP_RETRIES} attempts.")
+                    logging.error(f"❌ Failed to get a confident analysis after {MAX_ANALYSIS_GREP_RETRIES} attempts.")
                     return
 
             # B. Display Analysis and get confirmation
             logging.info("✅ Analysis complete. Awaiting user confirmation in browser.")
             plan_html_path = self._create_and_open_plan_html(analysis)
-            if not plan_html_path:
+            if not plan_html_path or not self._validate_analysis(analysis):
                 return
-
-            if not self._validate_analysis(analysis):
-                return
-            
             if not analysis.generation_order:
                 logging.info("AI analysis resulted in no files to change. Exiting.")
                 return
 
             # C. User Confirmation
             if not self.args.force:
+                class StatusAwareApprovalHandler(ApprovalHandler):
+                    cli_manager = self
+                    def do_GET(self):
+                        if self.path == '/status':
+                            try:
+                                update = self.cli_manager.status_queue.get(block=True, timeout=28)
+                                self._send_response(200, 'application/json', json.dumps(update).encode('utf-8'))
+                            except (queue.Empty, AttributeError):
+                                self._send_response(204, 'text/plain', b'')
+                        else:
+                            super().do_GET()
+
+                server = ApprovalWebServer(("", self.args.port), StatusAwareApprovalHandler, html_file_path=os.path.realpath(plan_html_path))
+                self.status_queue = queue.Queue()
+                server_thread = threading.Thread(target=server.serve_forever)
+                server_thread.daemon = True
+                server_thread.start()
+
                 webbrowser.open(f"file://{os.path.realpath(plan_html_path)}")
-                decision, data = wait_for_user_approval_from_browser(os.path.realpath(plan_html_path), self.args.port)
+                decision, data = server.wait_for_decision()
 
                 if decision == 'approve':
                     logging.info("✅ Plan approved by user. Proceeding with code generation.")
                     break
                 elif decision == 'reject':
                     logging.info("❌ Plan rejected by user. Operation cancelled.")
+                    server.shutdown()
                     return
                 elif decision == 'feedback':
                     user_feedback = data
                     previous_analysis = analysis
-                    logging.info(f"Re-running analysis with new feedback...")
-                    # continue loop
+                    logging.info("Re-running analysis with new feedback...")
+                    server.shutdown()
+                    server.server_close()
+                    continue
                 else:
                     logging.error("No decision received from the browser. Exiting.")
+                    server.shutdown()
                     return
             else:
                 logging.info("✅ Plan approved automatically (--force).")
                 break
 
-        # 5. Iterative Generation
-        unprocessed_files = self._execute_generation_loop(analysis, all_repo_files, app_desc_content)
-
-        # 6. Final Status
-        self._report_final_status(unprocessed_files)
+        try:
+            # 5. Iterative Generation
+            unprocessed_files = self._execute_generation_loop(analysis, all_repo_files, app_desc_content)
+            # 6. Final Status
+            self._report_final_status(unprocessed_files)
+            if server and self.status_queue:
+                self.status_queue.put({"status": "finished"})
+                time.sleep(5) # Give browser time to fetch final status
+        finally:
+            if server:
+                logging.info("Shutting down web server.")
+                server.shutdown()
+                server.server_close()
 
 
 if __name__ == "__main__":
