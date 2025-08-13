@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from pydantic_ai import Agent
 from pydantic_ai.models.google import GoogleModelSettings
 
-from html_utils import create_code_plan_html
+from html_utils import create_code_agent_html_viewer
 from shared_agents_utils import (
     AgentTools,
     ApprovalHandler,
@@ -438,7 +438,7 @@ class CliManager:
                 "gh", "pr", "create",
                 "--title", title,
                 "--body", body,
-                "--base", "main",
+                "--base", "master",
                 "--head", branch_name,
             ]
             
@@ -566,125 +566,142 @@ class CliManager:
             logging.error("No tracked or untracked files found. Exiting.")
             return
 
-        # 2. Analysis and Confirmation Loop
-        analysis: Optional[CodeAnalysis] = None
-        previous_analysis: Optional[CodeAnalysis] = None
-        user_feedback: Optional[str] = None
+        # 2. Start Web Server and open browser
         server = None
-        server_thread = None
+        if not self.args.force:
+            viewer_html_path = create_code_agent_html_viewer(self.args.port)
+            if not viewer_html_path:
+                logging.error("Failed to create the HTML viewer file.")
+                return
 
-        while True:  # This loop handles user feedback on the plan
-            # A. Get Analysis
-            if user_feedback:
-                logging.info(f"🔁 Re-analyzing plan with user feedback: '{user_feedback}'")
-                analysis = self.ai_agent.get_initial_analysis(
-                    self.args.task, all_repo_files, app_desc_content,
-                    feedback=user_feedback, previous_plan=previous_analysis,
-                    git_grep_search_tool=self.agent_tools.git_grep_search,
-                    read_file_tool=self.agent_tools.read_file
-                )
-                user_feedback = None
-            else:
-                grep_results = ""
-                analysis_retries = 0
-                while analysis_retries < MAX_ANALYSIS_GREP_RETRIES:
-                    current_analysis = self.ai_agent.get_initial_analysis(
-                        self.args.task, all_repo_files, app_desc_content,
-                        git_grep_search_tool=self.agent_tools.git_grep_search,
-                        read_file_tool=self.agent_tools.read_file,
-                        grep_results=grep_results or None
-                    )
-                    if current_analysis.additional_grep_queries_needed:
-                        analysis_retries += 1
-                        logging.info("🤖 AI has requested more information via git grep. Running queries...")
-                        new_results = [self.agent_tools.git_grep_search(q) for q in current_analysis.additional_grep_queries_needed]
-                        grep_results = "\n\n".join(new_results)
-                        analysis = None
+            class StatusAwareApprovalHandler(ApprovalHandler):
+                cli_manager = self
+                def do_GET(self):
+                    if self.path == '/status':
+                        try:
+                            # Use a long poll timeout on the server side
+                            update = self.cli_manager.status_queue.get(block=True, timeout=28)
+                            self._send_response(200, 'application/json', json.dumps(update).encode('utf-8'))
+                        except (queue.Empty, AttributeError):
+                            # Send 204 No Content if queue is empty after timeout
+                            self._send_response(204, 'text/plain', b'')
                     else:
-                        analysis = current_analysis
-                        break
-                if not analysis:
-                    logging.error(f"❌ Failed to get a confident analysis after {MAX_ANALYSIS_GREP_RETRIES} attempts.")
+                        # Serve the main HTML file for other paths
+                        super().do_GET()
+
+            server = ApprovalWebServer(('', self.args.port), StatusAwareApprovalHandler, html_file_path=os.path.realpath(viewer_html_path))
+            server_thread = threading.Thread(target=server.serve_forever)
+            server_thread.daemon = True
+            server_thread.start()
+            logging.info(f"🌐 Interactive viewer is running. Opening in your browser...")
+            webbrowser.open(f"file://{os.path.realpath(viewer_html_path)}")
+        else:
+            logging.info("Running in non-interactive mode due to --force flag.")
+
+        analysis: Optional[CodeAnalysis] = None
+        try:
+            # 3. Analysis and Confirmation Loop
+            previous_analysis: Optional[CodeAnalysis] = None
+            user_feedback: Optional[str] = None
+
+            while True:  # This loop handles user feedback on the plan
+                # A. Get Analysis
+                if server:
+                    self.status_queue.put({"status": "planning"})
+
+                if user_feedback:
+                    analysis = self.ai_agent.get_initial_analysis(
+                        self.args.task, all_repo_files, app_desc_content,
+                        feedback=user_feedback, previous_plan=previous_analysis,
+                        git_grep_search_tool=self.agent_tools.git_grep_search,
+                        read_file_tool=self.agent_tools.read_file
+                    )
+                    user_feedback = None
+                else:
+                    grep_results = ""
+                    analysis_retries = 0
+                    while analysis_retries < MAX_ANALYSIS_GREP_RETRIES:
+                        current_analysis = self.ai_agent.get_initial_analysis(
+                            self.args.task, all_repo_files, app_desc_content,
+                            git_grep_search_tool=self.agent_tools.git_grep_search,
+                            read_file_tool=self.agent_tools.read_file,
+                            grep_results=grep_results or None
+                        )
+                        if current_analysis.additional_grep_queries_needed:
+                            analysis_retries += 1
+                            logging.info("🤖 AI has requested more information via git grep. Running queries...")
+                            new_results = [self.agent_tools.git_grep_search(q) for q in current_analysis.additional_grep_queries_needed]
+                            grep_results = "\n\n".join(new_results)
+                            analysis = None
+                        else:
+                            analysis = current_analysis
+                            break
+                    if not analysis:
+                        if server:
+                            self.status_queue.put({"status": "error", "message": f"Failed to get a confident analysis after {MAX_ANALYSIS_GREP_RETRIES} attempts."})
+                        logging.error(f"❌ Failed to get a confident analysis after {MAX_ANALYSIS_GREP_RETRIES} attempts.")
+                        return
+
+                # B. Reconcile analysis
+                if not self._reconcile_and_validate_analysis(analysis, all_repo_files):
+                    if server:
+                        self.status_queue.put({"status": "error", "message": "Failed to reconcile the analysis plan."})
+                    logging.error("Failed to reconcile the analysis plan. Aborting.")
+                    return
+                
+                if not analysis.generation_order:
+                    logging.info("AI analysis resulted in no files to change. Exiting.")
+                    if server:
+                        self.status_queue.put({"status": "finished", "message": "AI analysis resulted in no files to change."})
                     return
 
-            # B. Reconcile analysis and get user confirmation
-            if not self._reconcile_and_validate_analysis(analysis, all_repo_files):
-                logging.error("Failed to reconcile the analysis plan. Aborting.")
-                return
+                # C. User Confirmation
+                if not self.args.force and server:
+                    logging.info("✅ Analysis complete. Awaiting user confirmation in browser.")
+                    self.status_queue.put({
+                        "status": "plan_ready",
+                        "plan": json.loads(analysis.model_dump_json()),
+                        "task": self.args.task
+                    })
 
-            logging.info("✅ Analysis complete. Awaiting user confirmation in browser.")
-            plan_html_path = create_code_plan_html(analysis, self.args.task, self.args.port)
-            if not plan_html_path:
-                logging.error("Failed to create the HTML plan file.")
-                return
-            
-            if not analysis.generation_order:
-                logging.info("AI analysis resulted in no files to change. Exiting.")
-                return
+                    decision, data = server.wait_for_decision()
 
-            # C. User Confirmation
-            if not self.args.force:
-                class StatusAwareApprovalHandler(ApprovalHandler):
-                    cli_manager = self
-                    def do_GET(self):
-                        if self.path == '/status':
-                            try:
-                                if self.cli_manager.status_queue:
-                                    update = self.cli_manager.status_queue.get(block=True, timeout=28)
-                                    self._send_response(200, 'application/json', json.dumps(update).encode('utf-8'))
-                            except (queue.Empty, AttributeError):
-                                self._send_response(204, 'text/plain', b'')
-                        else:
-                            super().do_GET()
-
-                server = ApprovalWebServer(('', self.args.port), StatusAwareApprovalHandler, html_file_path=os.path.realpath(plan_html_path))
-                server_thread = threading.Thread(target=server.serve_forever)
-                server_thread.daemon = True
-                server_thread.start()
-
-                webbrowser.open(f"file://{os.path.realpath(plan_html_path)}")
-                decision, data = server.wait_for_decision()
-
-                if decision == 'approve':
-                    logging.info("✅ Plan approved by user. Proceeding with code generation.")
-                    # Handle model override from user
-                    if data and isinstance(data, dict) and 'use_flash_model' in data:
-                        override_value: bool = bool(data.get('use_flash_model', False)) # type: ignore
-                        if analysis.use_flash_model != override_value:
-                            analysis.use_flash_model = override_value
-                            logging.info(f"Model selection overridden by user. 'Use Gemini Flash' is now set to: {analysis.use_flash_model}")
-                    
+                    if decision == 'approve':
+                        logging.info("✅ Plan approved by user. Proceeding with code generation.")
+                        if data and isinstance(data, dict) and 'use_flash_model' in data:
+                            override_value: bool = bool(data.get('use_flash_model', False))
+                            if analysis.use_flash_model != override_value:
+                                analysis.use_flash_model = override_value
+                                logging.info(f"Model selection overridden by user. 'Use Gemini Flash' is now set to: {analysis.use_flash_model}")
+                        
+                        if not self._create_and_checkout_branch(analysis.branch_name):
+                            self.status_queue.put({"status": "error", "message": "Could not create git branch."})
+                            logging.error("Could not create git branch. Aborting.")
+                            return
+                        break # Exit feedback loop
+                    elif decision == 'reject':
+                        logging.info("❌ Plan rejected by user. Operation cancelled.")
+                        return
+                    elif decision == 'feedback':
+                        user_feedback = data
+                        previous_analysis = analysis
+                        logging.info("Re-running analysis with new feedback...")
+                        # The loop will continue, and the JS will show the planning view again.
+                        continue
+                    else:
+                        logging.error("No decision received from the browser. Exiting.")
+                        return
+                else: # --force is on
+                    logging.info("✅ Plan approved automatically (--force).")
                     if not self._create_and_checkout_branch(analysis.branch_name):
                         logging.error("Could not create git branch. Aborting.")
-                        server.shutdown()
                         return
-                    break
-                elif decision == 'reject':
-                    logging.info("❌ Plan rejected by user. Operation cancelled.")
-                    server.shutdown()
-                    return
-                elif decision == 'feedback':
-                    user_feedback = data
-                    previous_analysis = analysis
-                    logging.info("Re-running analysis with new feedback...")
-                    server.shutdown()
-                    server.server_close()
-                    continue
-                else:
-                    logging.error("No decision received from the browser. Exiting.")
-                    server.shutdown()
-                    return
-            else:
-                logging.info("✅ Plan approved automatically (--force).")
-                if not self._create_and_checkout_branch(analysis.branch_name):
-                    logging.error("Could not create git branch. Aborting.")
-                    return
-                break
+                    break # Exit feedback loop
 
-        try:
-            # 5. Iterative Generation
+            # 4. Iterative Generation
             unprocessed_files = self._execute_generation_loop(analysis, all_repo_files, app_desc_content)
-            # 6. Final Status
+            
+            # 5. Final Status
             self._report_final_status(unprocessed_files)
 
             if not unprocessed_files:
@@ -701,7 +718,7 @@ class CliManager:
 
             if server and self.status_queue:
                 self.status_queue.put({"status": "finished"})
-                time.sleep(5) # Give browser time to fetch final status
+                time.sleep(2) # Give browser time to fetch final status
         finally:
             if server:
                 logging.info("Shutting down web server.")

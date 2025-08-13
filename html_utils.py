@@ -364,50 +364,8 @@ COMMON_STYLE = """
 # --- Code Agent HTML Generation ---
 
 
-def _format_files_to_create_html(files_to_create: List["NewFile"]) -> str:
-    """Formats the list of files to create into an HTML table."""
-    if not files_to_create:
-        return "<p>None</p>"
-
-    table_rows = ""
-    for file in files_to_create:
-        suggestions_html = (
-            "<ul>"
-            + "".join([f"<li><code>{sug}</code></li>" for sug in file.content_suggestions])
-            + "</ul>"
-            if file.content_suggestions
-            else "None"
-        )
-        table_rows += f"""
-        <tr>
-            <td><code>{file.file_path}</code></td>
-            <td>{file.reasoning}</td>
-            <td>{suggestions_html}</td>
-        </tr>
-        """
-
-    return f"""
-    <table>
-        <thead>
-            <tr>
-                <th>File Path</th>
-                <th>Reasoning</th>
-                <th>Content Suggestions</th>
-            </tr>
-        </thead>
-        <tbody>
-            {table_rows}
-        </tbody>
-    </table>
-    """
-
-
-def create_code_plan_html(analysis: "CodeAnalysis", task: str, port: int) -> Optional[str]:
-    """Generates an HTML report for the code generation plan and returns the file path."""
-    if not analysis:
-        return None
-
-    plan_html = "".join([f'{markdown.markdown(step, extensions=["fenced_code", "tables"])}' for step in analysis.plan])
+def create_code_agent_html_viewer(port: int) -> Optional[str]:
+    """Generates a dynamic HTML viewer for the code agent lifecycle."""
 
     html_content = f"""
 <!DOCTYPE html>
@@ -415,222 +373,162 @@ def create_code_plan_html(analysis: "CodeAnalysis", task: str, port: int) -> Opt
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Code Generation Plan</title>
+    <title>AI Code Agent</title>
     {COMMON_STYLE}
+    <style>
+        .view {{ display: none; }}
+        .view.active {{ display: block; }}
+        
+        @keyframes progress-bar-stripes {{
+            from {{ background-position: 1rem 0; }}
+            to {{ background-position: 0 0; }}
+        }}
+        .progress-bar.animated {{
+            animation: progress-bar-stripes 1s linear infinite;
+            background-image: linear-gradient(45deg,rgba(255,255,255,.15) 25%,transparent 25%,transparent 50%,rgba(255,255,255,.15) 50%,rgba(255,255,255,.15) 75%,transparent 75%,transparent);
+            background-size: 1rem 1rem;
+        }}
+    </style>
 </head>
 <body>
-    <div id="main-content" class="main-container">
-        <h1>🤖 AI Code Generation Plan</h1>
-
-        <div class="container">
-            <h2>Task</h2>
-            <p>{task}</p>
-        </div>
-
-        <div class="container">
-            <h2>High-level Plan</h2>
-            {plan_html if analysis.plan else "<p>No plan provided.</p>"}
-        </div>
-
-        <div class="container">
-            <h2>Overall Reasoning</h2>
-            <p>{analysis.reasoning or "No reasoning provided."}</p>
-        </div>
-
-        <div class="container">
-            <h2>File Breakdown</h2>
-
-            <h3>Relevant Files for Context</h3>
-            <ul>
-                {''.join([f'<li><code>{file}</code></li>' for file in analysis.relevant_files]) if analysis.relevant_files else "<li>None</li>"}
-            </ul>
-
-            <h3>Files to Edit</h3>
-            <ul>
-                {''.join([f'<li><code>{file}</code></li>' for file in analysis.files_to_edit]) if analysis.files_to_edit else "<li>None</li>"}
-            </ul>
-
-            <h3>Files to Create</h3>
-            {_format_files_to_create_html(analysis.files_to_create)}
-        </div>
-        
-        <div class="container">
-            <h2>Proposed Generation Order</h2>
-            <ol>
-                {''.join([f'<li><code>{file}</code></li>' for file in analysis.generation_order]) if analysis.generation_order else "<li>None</li>"}
-            </ol>
-        </div>
-
-        <div id="actions-container" class="container actions">
-            <h2>Confirm Plan</h2>
-            <p>Do you want to proceed with generating the code based on this plan?</p>
-            
-            <div class="model-toggle">
-                <input type="checkbox" id="use-flash-model" name="use-flash-model" {'checked' if analysis.use_flash_model else ''}>
-                <label for="use-flash-model">Override: Use Gemini Flash Model (faster, for simple tasks)</label>
-            </div>
-
-            <button class="approve-btn" onclick="sendDecision('approve')">Approve & Generate Code</button>
-            <button class="reject-btn" onclick="sendDecision('reject')">Reject</button>
-            <div class="feedback-form">
-                <h3>Refine the Plan</h3>
-                <p>If the plan isn't quite right, provide feedback below and submit it for a new plan.</p>
-                <textarea id="feedback-text" placeholder="e.g., 'Please also create a new file for utility functions' or 'The plan seems to miss the point about Y'"></textarea>
-                <br>
-                <button class="feedback-btn" onclick="sendFeedback()">Submit Feedback</button>
-            </div>
-        </div>
+    <div id="main-container" class="main-container">
+        <!-- Content will be rendered here by JavaScript -->
     </div>
 
     <script>
         const port = {port};
-        const mainContent = document.getElementById('main-content');
-        const totalFiles = {len(analysis.generation_order) if analysis.generation_order else 0};
-        let completedFiles = 0;
-        let progressUpdater = null;
-        let currentFileStartTime = null;
-        const estimatedTimePerFile = 180; // 3 minutes in seconds
-        let timelineItemCounter = 0;
+        const mainContainer = document.getElementById('main-container');
+        
+        let state = {{
+            task: '',
+            plan: null,
+            status: 'initializing',
+            totalFiles: 0,
+            completedFiles: 0,
+            timelineItemCounter: 0,
+            pollingActive: false,
+        }};
 
+        // UTILITY FUNCTIONS
         function escapeHtml(unsafe) {{
-            if (typeof unsafe !== 'string') {{
-                return '';
-            }}
-            return unsafe
-                .replace(/&/g, "&amp;")
-                .replace(/</g, "&lt;")
-                .replace(/>/g, "&gt;")
-                .replace(/"/g, "&quot;")
-                .replace(/'/g, "&#039;");
+            if (typeof unsafe !== 'string') return '';
+            return unsafe.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
         }}
 
-        function showMessage(title, message) {{
-            mainContent.innerHTML = `<div class="container"><h1>${{title}}</h1><p>${{message}}</p></div>`;
-        }}
-
-        function updateProgressBar() {{
-            if (!currentFileStartTime) return;
-            const elapsedTime = (Date.now() - currentFileStartTime) / 1000;
-            const currentFileTimeProgress = Math.min(1.0, elapsedTime / estimatedTimePerFile);
-            const completedProgress = (completedFiles / totalFiles);
-            const currentProgress = (currentFileTimeProgress / totalFiles);
-            const totalPercentage = Math.min(99, Math.floor((completedProgress + currentProgress) * 100));
-            const progressBar = document.getElementById('generation-progress-bar');
-            if (progressBar) {{
-                progressBar.style.width = `${{totalPercentage}}%`;
-                progressBar.textContent = `${{totalPercentage}}% Complete`;
-            }}
-        }}
-
-        function pollStatus() {{
-            fetch(`http://localhost:${{port}}/status`)
-                .then(response => {{
-                    if (response.status === 204) {{
-                        setTimeout(pollStatus, 1000);
-                        return null;
-                    }}
-                    if (!response.ok) throw new Error(`HTTP error! status: ${{response.status}}`);
-                    return response.json();
-                }})
-                .then(data => {{
-                    if (!data) return;
-
-                    const logContainer = document.getElementById('generation-log');
-                    if (!logContainer) return;
-
-                    if (timelineItemCounter === 0 && logContainer.querySelector('.placeholder')) {{
-                        logContainer.innerHTML = '';
-                    }}
-
-                    if (data.status === 'writing') {{
-                        if (progressUpdater) clearInterval(progressUpdater);
-                        currentFileStartTime = Date.now();
-                        progressUpdater = setInterval(updateProgressBar, 1000);
-
-                        const side = timelineItemCounter % 2 === 0 ? 'left' : 'right';
-                        const elementId = `item-${{data.file_path.replace(/[^a-zA-Z0-9]/g, '-')}}`;
-                        
-                        const timelineItem = document.createElement('div');
-                        timelineItem.id = elementId;
-                        timelineItem.className = `timeline-item ${{side}}`;
-                        timelineItem.innerHTML = `
-                            <div class="timeline-content">
-                                <h3>⏳ Generating File...</h3>
-                                <code>${{escapeHtml(data.file_path)}}</code>
+        // RENDER FUNCTIONS
+        function renderPlanningView(message = 'Analyzing your request...') {{
+            state.timelineItemCounter = 0;
+            mainContainer.innerHTML = `
+                <div id="planning-view" class="view active">
+                    <div class="container">
+                        <h1>🤖 AI Code Agent</h1>
+                        <div id="planning-status">
+                            <h2>${{escapeHtml(message)}}</h2>
+                            <p>The AI agent is currently analyzing the codebase and formulating a plan. This may take a few moments.</p>
+                            <div class="progress-bar-container" style="margin-top: 2rem;">
+                                <div class="progress-bar animated" style="width: 100%; background-color: var(--primary-color);">Thinking...</div>
                             </div>
-                        `;
-                        logContainer.appendChild(timelineItem);
-                        timelineItemCounter++;
-
-                    }} else if (data.status === 'done') {{
-                        if (progressUpdater) {{
-                            clearInterval(progressUpdater);
-                            progressUpdater = null;
-                        }}
-                        currentFileStartTime = null;
-                        completedFiles++;
-                        
-                        const percentage = totalFiles > 0 ? Math.round((completedFiles / totalFiles) * 100) : 0;
-                        const progressBar = document.getElementById('generation-progress-bar');
-                        if (progressBar) {{
-                            progressBar.style.width = `${{percentage}}%`;
-                            progressBar.textContent = `${{percentage}}% Complete`;
-                        }}
-
-                        const elementId = `item-${{data.file_path.replace(/[^a-zA-Z0-9]/g, '-')}}`;
-                        const timelineItem = document.getElementById(elementId);
-                        
-                        if (timelineItem) {{
-                            timelineItem.innerHTML = `
-                                <div class="timeline-content">
-                                    <h3>✅ File Complete: <code>${{escapeHtml(data.file_path)}}</code></h3>
-                                    <h4>Summary of Changes</h4>
-                                    <p>${{escapeHtml(data.summary || 'No summary provided.')}}</p>
-                                    <h4>Reasoning for Changes</h4>
-                                    <blockquote>${{escapeHtml(data.reasoning || 'No reasoning provided.')}}</blockquote>
+                            <div id="tool-log" class="timeline">
+                                <div class="timeline-item left placeholder">
+                                    <div class="timeline-content">
+                                        <h3>🚀 Process Started</h3>
+                                        <p>Waiting for the agent to begin analysis...</p>
+                                    </div>
                                 </div>
-                            `;
-                        }}
-
-                    }} else if (data.status === 'finished') {{
-                        if (progressUpdater) clearInterval(progressUpdater);
-                        currentFileStartTime = null;
-
-                        const progressBar = document.getElementById('generation-progress-bar');
-                        if (progressBar) {{
-                            progressBar.style.width = '100%';
-                            progressBar.textContent = '100% Complete';
-                        }}
-
-                        const side = timelineItemCounter % 2 === 0 ? 'left' : 'right';
-                        const finishedItem = document.createElement('div');
-                        finishedItem.className = `timeline-item ${{side}}`;
-                        finishedItem.innerHTML = `
-                            <div class="timeline-content" style="background-color: var(--success-color); color: white;">
-                                <h3>🎉 Process Finished!</h3>
-                                <p>All files generated successfully. You can now close this window.</p>
                             </div>
-                        `;
-                        logContainer.appendChild(finishedItem);
-                        return; // Stop polling
-                    }}
-                    setTimeout(pollStatus, 500);
-                }})
-                .catch(err => {{
-                    if (progressUpdater) clearInterval(progressUpdater);
-                    const logContainer = document.getElementById('generation-log');
-                    if (logContainer) {{
-                        logContainer.innerHTML += `<p style="color: var(--danger-color);">Connection to server lost. Please check the agent's console output.</p>`;
-                    }}
-                    console.error('Error polling status:', err);
-                }});
+                        </div>
+                    </div>
+                </div>
+            `;
         }}
 
-        function sendDecision(decision) {{
-            if (decision === 'approve') {{
-                const generationContainer = document.createElement('div');
-                generationContainer.className = 'container';
-                generationContainer.innerHTML = `
+        function formatFilesToCreateHtml(files) {{
+            if (!files || files.length === 0) return "<p>None</p>";
+            const rows = files.map(file => {{
+                const suggestions = (file.content_suggestions && file.content_suggestions.length > 0)
+                    ? `<ul>${{file.content_suggestions.map(s => `<li><code>${{escapeHtml(s)}}</code></li>`).join('')}}</ul>`
+                    : 'None';
+                return `
+                    <tr>
+                        <td><code>${{escapeHtml(file.file_path)}}</code></td>
+                        <td>${{escapeHtml(file.reasoning)}}</td>
+                        <td>${{suggestions}}</td>
+                    </tr>
+                `;
+            }}).join('');
+
+            return `
+                <table>
+                    <thead><tr><th>File Path</th><th>Reasoning</th><th>Content Suggestions</th></tr></thead>
+                    <tbody>${{rows}}</tbody>
+                </table>
+            `;
+        }}
+
+        function renderPlanReviewView() {{
+            const {{ plan, task }} = state;
+            if (!plan) return;
+
+            // The backend converts markdown to HTML, so we just join the strings.
+            const planHtml = plan.plan.join('');
+            
+            mainContainer.innerHTML = `
+            <div id="plan-review-view" class="view active">
+                <h1>🤖 AI Code Generation Plan</h1>
+                <div class="container">
+                    <h2>Task</h2>
+                    <p>${{escapeHtml(task)}}</p>
+                </div>
+                <div class="container">
+                    <h2>High-level Plan</h2>
+                    ${{planHtml || "<p>No plan provided.</p>"}}
+                </div>
+                <div class="container">
+                    <h2>Overall Reasoning</h2>
+                    <p>${{escapeHtml(plan.reasoning) || "No reasoning provided."}}</p>
+                </div>
+                <div class="container">
+                    <h2>File Breakdown</h2>
+                    <h3>Relevant Files for Context</h3>
+                    <ul>${{plan.relevant_files.length > 0 ? plan.relevant_files.map(f => `<li><code>${{escapeHtml(f)}}</code></li>`).join('') : "<li>None</li>"}}</ul>
+                    <h3>Files to Edit</h3>
+                    <ul>${{plan.files_to_edit.length > 0 ? plan.files_to_edit.map(f => `<li><code>${{escapeHtml(f)}}</code></li>`).join('') : "<li>None</li>"}}</ul>
+                    <h3>Files to Create</h3>
+                    ${{formatFilesToCreateHtml(plan.files_to_create)}}
+                </div>
+                <div class="container">
+                    <h2>Proposed Generation Order</h2>
+                    <ol>${{plan.generation_order.length > 0 ? plan.generation_order.map(f => `<li><code>${{escapeHtml(f)}}</code></li>`).join('') : "<li>None</li>"}}</ol>
+                </div>
+                <div id="actions-container" class="container actions">
+                    <h2>Confirm Plan</h2>
+                    <p>Do you want to proceed with generating the code based on this plan?</p>
+                    <div class="model-toggle">
+                        <input type="checkbox" id="use-flash-model" name="use-flash-model" ${{plan.use_flash_model ? 'checked' : ''}}>
+                        <label for="use-flash-model">Override: Use Gemini Flash Model (faster, for simple tasks)</label>
+                    </div>
+                    <button class="approve-btn" onclick="sendDecision('approve')">Approve & Generate Code</button>
+                    <button class="reject-btn" onclick="sendDecision('reject')">Reject</button>
+                    <div class="feedback-form">
+                        <h3>Refine the Plan</h3>
+                        <p>If the plan isn't quite right, provide feedback below and submit it for a new plan.</p>
+                        <textarea id="feedback-text" placeholder="e.g., 'Please also create a new file for utility functions' or 'The plan seems to miss the point about Y'"></textarea>
+                        <br>
+                        <button class="feedback-btn" onclick="sendFeedback()">Submit Feedback</button>
+                    </div>
+                </div>
+            </div>
+            `;
+        }}
+
+        function renderGenerationView() {{
+            state.timelineItemCounter = 0;
+            state.completedFiles = 0;
+            state.totalFiles = state.plan.generation_order.length;
+
+            mainContainer.innerHTML = `
+            <div id="generation-view" class="view active">
+                <div class="container">
                     <h2>⚙️ Code Generation Progress</h2>
                     <div class="progress-bar-container">
                         <div class="progress-bar" id="generation-progress-bar" style="width: 0%;">0%</div>
@@ -643,65 +541,235 @@ def create_code_plan_html(analysis: "CodeAnalysis", task: str, port: int) -> Opt
                             </div>
                         </div>
                     </div>
+                </div>
+            </div>
+            `;
+        }}
+
+        function showMessage(title, message, isError = false) {{
+            mainContainer.innerHTML = `
+                <div class="container">
+                    <h1 style="${{isError ? 'color: var(--danger-color);' : ''}}">${{escapeHtml(title)}}</h1>
+                    <p>${{escapeHtml(message)}}</p>
+                </div>`;
+        }}
+
+        // STATUS POLLING AND EVENT HANDLING
+        function pollStatus() {{
+            if (!state.pollingActive) return;
+
+            fetch(`http://localhost:${{port}}/status`)
+                .then(response => {{
+                    if (response.status === 204) {{ // No content, just continue polling
+                        setTimeout(pollStatus, 1000);
+                        return null;
+                    }}
+                    if (!response.ok) throw new Error(`HTTP error! status: ${{response.status}}`);
+                    return response.json();
+                }})
+                .then(data => {{
+                    if (!data) return;
+                    handleStatusUpdate(data);
+                    
+                    if (data.status !== 'finished' && data.status !== 'error') {{
+                        setTimeout(pollStatus, 500);
+                    }} else {{
+                        state.pollingActive = false;
+                    }}
+                }})
+                .catch(err => {{
+                    state.pollingActive = false;
+                    showMessage('Connection Error', 'Connection to the agent was lost. Please check the console output.', true);
+                    console.error('Error polling status:', err);
+                }});
+        }}
+
+        function handleStatusUpdate(data) {{
+            const newStatus = data.status;
+            // Don't re-render for every single status if the view doesn't change
+            if (newStatus === state.status && !['tool_used', 'writing', 'done'].includes(newStatus)) return;
+
+            state.status = newStatus;
+
+            switch (newStatus) {{
+                case 'planning':
+                    if (!document.getElementById('planning-view')) {{
+                        renderPlanningView();
+                    }}
+                    break;
+                
+                case 'tool_used':
+                    updateToolLog(data);
+                    break;
+
+                case 'plan_ready':
+                    state.plan = data.plan;
+                    state.task = data.task;
+                    renderPlanReviewView();
+                    break;
+                
+                case 'writing':
+                case 'done':
+                case 'finished':
+                    updateGenerationProgress(data);
+                    break;
+                
+                case 'error':
+                    showMessage('Agent Error', data.message, true);
+                    break;
+            }}
+        }}
+
+        function updateToolLog(data) {{
+            const logContainer = document.getElementById('tool-log');
+            if (!logContainer) return;
+
+            if (state.timelineItemCounter === 0 && logContainer.querySelector('.placeholder')) {{
+                logContainer.innerHTML = '';
+            }}
+
+            const side = state.timelineItemCounter % 2 === 0 ? 'left' : 'right';
+            const toolItem = document.createElement('div');
+            toolItem.className = `timeline-item ${{side}}`;
+            toolItem.innerHTML = `
+                <div class="timeline-content">
+                    <h3>🛠️ Tool Used: <code>${{escapeHtml(data.tool_name)}}</code></h3>
+                    <p>Input:</p>
+                    <pre><code>${{escapeHtml(JSON.stringify(data.tool_input, null, 2))}}</code></pre>
+                </div>
+            `;
+            logContainer.appendChild(toolItem);
+            state.timelineItemCounter++;
+        }}
+
+        function updateGenerationProgress(data) {{
+            const logContainer = document.getElementById('generation-log');
+            if (!logContainer) return;
+
+            if (state.timelineItemCounter === 0 && logContainer.querySelector('.placeholder')) {{
+                logContainer.innerHTML = '';
+            }}
+
+            if (data.status === 'writing') {{
+                const side = state.timelineItemCounter % 2 === 0 ? 'left' : 'right';
+                const elementId = `item-${{data.file_path.replace(/[^a-zA-Z0-9]/g, '-')}}`;
+                
+                const timelineItem = document.createElement('div');
+                timelineItem.id = elementId;
+                timelineItem.className = `timeline-item ${{side}}`;
+                timelineItem.innerHTML = `
+                    <div class="timeline-content">
+                        <h3>⏳ Generating File...</h3>
+                        <code>${{escapeHtml(data.file_path)}}</code>
+                    </div>
                 `;
+                logContainer.appendChild(timelineItem);
+                state.timelineItemCounter++;
+
+            }} else if (data.status === 'done') {{
+                state.completedFiles++;
+                
+                const percentage = state.totalFiles > 0 ? Math.round((state.completedFiles / state.totalFiles) * 100) : 0;
+                const progressBar = document.getElementById('generation-progress-bar');
+                if (progressBar) {{
+                    progressBar.style.width = `${{percentage}}%`;
+                    progressBar.textContent = `${{percentage}}% Complete`;
+                }}
+
+                const elementId = `item-${{data.file_path.replace(/[^a-zA-Z0-9]/g, '-')}}`;
+                const timelineItem = document.getElementById(elementId);
+                
+                if (timelineItem) {{
+                    timelineItem.innerHTML = `
+                        <div class="timeline-content">
+                            <h3>✅ File Complete: <code>${{escapeHtml(data.file_path)}}</code></h3>
+                            <h4>Summary of Changes</h4>
+                            <p>${{escapeHtml(data.summary || 'No summary provided.')}}</p>
+                            <h4>Reasoning for Changes</h4>
+                            <blockquote>${{escapeHtml(data.reasoning || 'No reasoning provided.')}}</blockquote>
+                        </div>
+                    `;
+                }}
+
+            }} else if (data.status === 'finished') {{
+                const progressBar = document.getElementById('generation-progress-bar');
+                if (progressBar) {{
+                    progressBar.style.width = '100%';
+                    progressBar.textContent = '100% Complete';
+                }}
+
+                const side = state.timelineItemCounter % 2 === 0 ? 'left' : 'right';
+                const finishedItem = document.createElement('div');
+                finishedItem.className = `timeline-item ${{side}}`;
+                finishedItem.innerHTML = `
+                    <div class="timeline-content" style="background-color: var(--success-color); color: white;">
+                        <h3>🎉 Process Finished!</h3>
+                        <p>All files generated successfully. You can now close this window.</p>
+                    </div>
+                `;
+                logContainer.appendChild(finishedItem);
+            }}
+        }}
+
+        function sendDecision(decision) {{
+            if (decision === 'approve') {{
+                renderGenerationView();
                 
                 const useFlash = document.getElementById('use-flash-model').checked;
-                const actionsContainer = document.getElementById('actions-container');
-                if (actionsContainer) {{
-                    actionsContainer.parentNode.replaceChild(generationContainer, actionsContainer);
-                }} else {{
-                    mainContent.appendChild(generationContainer);
-                }}
                 
                 fetch(`http://localhost:${{port}}/approve`, {{
                     method: 'POST',
                     headers: {{ 'Content-Type': 'application/json' }},
                     body: JSON.stringify({{ use_flash_model: useFlash }})
-                }})
-                    .then(res => {{
-                        if (!res.ok) throw new Error('Approval request failed');
-                        pollStatus();
-                    }})
-                    .catch(err => {{
-                        const log = document.getElementById('generation-log');
-                        if (log) log.innerHTML = `<p style="color: var(--danger-color);">Could not start generation process. Check the agent's console.</p>`;
-                        console.error('Error sending approval:', err);
-                    }});
+                }}).catch(err => {{
+                    showMessage('Error', "Could not start generation process. Check the agent's console.", true);
+                    console.error('Error sending approval:', err);
+                }});
                 return;
             }}
 
-            const isFeedback = decision === 'feedback';
-            let fetchOptions = {{ method: 'POST' }};
-            let url = `http://localhost:${{port}}/${{decision}}`;
-
-            if (isFeedback) {{
-                const feedback = document.getElementById('feedback-text').value;
-                if (!feedback) {{
-                    alert('Please enter feedback before submitting.');
-                    return;
-                }}
-                url = `http://localhost:${{port}}/feedback`;
-                fetchOptions.headers = {{ 'Content-Type': 'application/json' }};
-                fetchOptions.body = JSON.stringify({{ feedback: feedback }});
-            }}
-
-            fetch(url, fetchOptions)
+            // For reject
+            fetch(`http://localhost:${{port}}/reject`, {{ method: 'POST' }})
                 .then(response => response.text())
                 .then(text => {{
-                    const message = isFeedback ? 'The agent is re-analyzing. You can close this tab now.' : text;
-                    const title = isFeedback ? 'Feedback Submitted' : 'Decision Received';
-                    showMessage(title, message);
-                    setTimeout(() => window.close(), 3000);
+                    state.pollingActive = false;
+                    showMessage('Plan Rejected', 'The operation was cancelled. You can close this tab.');
+                    setTimeout(() => window.close(), 5000);
                 }})
                 .catch(err => {{
-                    showMessage('Error', `Could not contact server while sending '${{decision}}'.`);
-                    console.error(`Error sending ${{decision}}:`, err);
+                    showMessage('Error', `Could not contact server while sending 'reject'.`, true);
+                    console.error(`Error sending reject:`, err);
                 }});
         }}
 
         function sendFeedback() {{
-            sendDecision('feedback');
+            const feedback = document.getElementById('feedback-text').value;
+            if (!feedback) {{
+                alert('Please enter feedback before submitting.');
+                return;
+            }}
+            
+            fetch(`http://localhost:${{port}}/feedback`, {{
+                method: 'POST',
+                headers: {{ 'Content-Type': 'application/json' }},
+                body: JSON.stringify({{ feedback: feedback }})
+            }})
+            .then(res => {{
+                if (!res.ok) throw new Error('Feedback request failed');
+                renderPlanningView('Re-analyzing with your feedback...');
+            }})
+            .catch(err => {{
+                showMessage('Error', 'Could not submit feedback. Please check the agent console.', true);
+                console.error('Error sending feedback:', err);
+            }});
         }}
+
+        // INITIALIZATION
+        document.addEventListener('DOMContentLoaded', () => {{
+            renderPlanningView();
+            state.pollingActive = true;
+            pollStatus();
+        }});
     </script>
 </body>
 </html>
@@ -714,10 +782,10 @@ def create_code_plan_html(analysis: "CodeAnalysis", task: str, port: int) -> Opt
         ) as f:
             plan_file_path = f.name
             f.write(html_content)
-        logging.info(f"✅ Plan saved to temporary file: {plan_file_path}")
+        logging.info(f"✅ Viewer HTML saved to temporary file: {plan_file_path}")
         return plan_file_path
     except Exception as e:
-        logging.error(f"❌ Could not write the HTML plan: {e}")
+        logging.error(f"❌ Could not write the HTML viewer file: {e}")
         return None
 
 
