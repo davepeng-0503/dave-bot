@@ -2,7 +2,7 @@ This repository contains a suite of AI-powered developer assistant tools designe
 
 This repository will use strictly Gemini-2.5 flash or pro models.
 
-There are two primary agents:
+There are three primary agents:
 
 1.  **Code Agent (`code_agent.py`)**:
     *   **Purpose**: To autonomously perform coding tasks based on a natural language description.
@@ -28,11 +28,24 @@ There are two primary agents:
         *   `FileReview`: Defines the output for a single file's review, containing comments, feedback, and context requests.
     *   **Usage**: Run from the command line with a `--task` argument describing the goal of the changes under review.
 
+3.  **Advise Agent (`advise_agent.py`)**:
+    *   **Purpose**: To answer questions and provide advice about the codebase. It acts as a technical advisor that has read the code.
+    *   **Workflow**:
+        1.  It takes a user's question about the codebase via the `--task` argument.
+        2.  It performs an analysis of the codebase to identify the most relevant files for answering the question.
+        3.  It uses `git grep` and file-reading tools to explore the code and build confidence in its context-gathering plan.
+        4.  Once it has gathered context from the relevant files, it generates a detailed, Markdown-formatted response to the user's question.
+        5.  The final output is presented in an HTML file, including the advice and a list of the source files used.
+    *   **Key Pydantic Models**:
+        *   `AdviceAnalysis`: Defines the structure for the initial plan to find relevant context, including a list of files and potential `git grep` queries.
+        *   `Advice`: Defines the structure for the final output, containing the Markdown response and a list of referenced files.
+    *   **Usage**: Run from the command line with a `--task` argument containing the question you want to ask.
+
 **Shared Utilities (`shared_agents_utils.py`)**:
-This file contains common code shared by both agents. This includes:
+This file contains common code shared by all agents. This includes:
 *   File system operations (`read_file_content`, `write_file_content`).
 *   Git integration (`get_git_files`).
 *   A `BaseAiAgent` class for handling Google API key loading and model configuration.
 *   A context-building function (`build_context_from_dict`) that can summarize files if the total context exceeds a certain size limit, ensuring it can handle large repositories.
 
-The overall goal of this project is to create intelligent agents that can reliably and effectively assist human developers with coding and review tasks, directly within their local development environment.
+The overall goal of this project is to create intelligent agents that can reliably and effectively assist human developers with coding, review, and advisory tasks, directly within their local development environment.

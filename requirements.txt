@@ -2,3 +2,4 @@ google-generativeai
 pydantic
 pydantic-ai
 python-dotenv
+markdown
