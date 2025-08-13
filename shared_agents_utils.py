@@ -399,6 +399,13 @@ class ApprovalWebServer(socketserver.TCPServer):
         """Blocks until a decision is made and returns it."""
         self.decision_made.wait()
         return self.user_decision, self.user_data
+        
+    def reset_decision(self):
+        """Resets the server's state to wait for a new decision."""
+        self.decision_made.clear()
+        self.user_decision = None
+        self.user_data = None
+        logging.info("Server has been reset and is waiting for a new decision.")
 
 
 class ApprovalHandler(http.server.BaseHTTPRequestHandler):
