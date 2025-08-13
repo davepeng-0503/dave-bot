@@ -345,6 +345,14 @@ COMMON_STYLE = """
     .timeline-content code {
         font-size: 95%;
     }
+    .timeline-content.warning {
+        background-color: #fffbe6;
+        border-left: 4px solid #fadb14;
+    }
+    .timeline-content.error {
+        background-color: #fff1f0;
+        border-left: 4px solid #ff4d4f;
+    }
 </style>
 """
 
@@ -566,6 +574,35 @@ def create_code_agent_html_viewer(port: int) -> Optional[str]:
             `;
         }}
 
+        function addGenericTimelineItem(message, icon, cssClass) {{
+            const planningLog = document.getElementById('tool-log');
+            const generationLog = document.getElementById('generation-log');
+            let logContainer = null;
+
+            // Check which timeline is currently visible in the DOM
+            if (planningLog && planningLog.offsetParent !== null) {{
+                logContainer = planningLog;
+            }} else if (generationLog && generationLog.offsetParent !== null) {{
+                logContainer = generationLog;
+            }}
+
+            if (!logContainer) return;
+
+            if (state.timelineItemCounter === 0 && logContainer.querySelector('.placeholder')) {{
+                logContainer.innerHTML = '';
+            }}
+
+            const item = document.createElement('div');
+            item.className = "timeline-item";
+            item.innerHTML = `
+                <div class="timeline-content ${{cssClass || ''}}">
+                    <h3>${{icon || 'ℹ️'}} ${{escapeHtml(message)}}</h3>
+                </div>
+            `;
+            logContainer.appendChild(item);
+            state.timelineItemCounter++;
+        }}
+
         function showMessage(title, message, isError = false) {{
             mainContainer.innerHTML = `
                 <div class="container">
@@ -608,12 +645,16 @@ def create_code_agent_html_viewer(port: int) -> Optional[str]:
             const newStatus = data.status;
             const oldStatus = state.status;
 
-            // Don't re-render for every single status if the view doesn't change
-            if (newStatus === oldStatus && !['tool_used', 'writing', 'done'].includes(newStatus)) return;
+            // Allow certain event-like statuses to be processed repeatedly.
+            if (newStatus === oldStatus && !['tool_used', 'writing', 'done', 'cli_log'].includes(newStatus)) return;
 
             state.status = newStatus;
 
             switch (newStatus) {{
+                case 'cli_log':
+                    addGenericTimelineItem(data.message, data.icon, data.cssClass);
+                    break;
+
                 case 'tool_used':
                     updateToolLog(data);
                     break;
