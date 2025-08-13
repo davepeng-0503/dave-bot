@@ -166,7 +166,7 @@ Now, please provide your final analysis. You should be confident enough to not r
 Please provide your analysis. Use the `git_grep_search_tool` and `read_file_tool` if you need to find specific code snippets or understand file contents. If you are not confident in your plan, request more grep searches by populating `additional_grep_queries_needed`.
 """
         
-        tools = []
+        tools: List[Callable] = []
         if git_grep_search_tool:
             tools.append(git_grep_search_tool)
         if read_file_tool:
@@ -199,7 +199,7 @@ Please provide your analysis. Use the `git_grep_search_tool` and `read_file_tool
         
         system_prompt = f"""
 You are an expert programmer tasked with writing a complete Python file.
-Based on the overall task, the provided context from other relevant files, and the original code (if any), 
+Based on the overall task, the provided context from other relevant files, and the original code (if any),
 you will generate the full, production-ready code for the specified file path.
 
 **IMPORTANT RULES**:
@@ -536,7 +536,7 @@ class CliManager:
                         else:
                             super().do_GET()
 
-                server = ApprovalWebServer(("", self.args.port), StatusAwareApprovalHandler, html_file_path=os.path.realpath(plan_html_path))
+                server = ApprovalWebServer(('', self.args.port), StatusAwareApprovalHandler, html_file_path=os.path.realpath(plan_html_path))
                 self.status_queue = queue.Queue()
                 server_thread = threading.Thread(target=server.serve_forever)
                 server_thread.daemon = True

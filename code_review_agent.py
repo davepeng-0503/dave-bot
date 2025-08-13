@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+"""Code review agent for the AI-driven development tool."""
 import argparse
 import json
 import logging
@@ -121,7 +121,7 @@ Now, please provide your final analysis. You should be confident enough to not r
 Please provide your analysis. Use the `git_grep_search_tool` and `read_file_tool` if you need to find specific code snippets or understand file contents. If you are not confident in your plan, request more grep searches by populating `additional_grep_queries_needed`.
 """
         
-        tools = []
+        tools: List[Callable] = []
         if git_grep_search_tool:
             tools.append(git_grep_search_tool)
         if read_file_tool:

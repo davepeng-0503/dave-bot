@@ -127,7 +127,7 @@ Now, please provide your final analysis. You should be confident enough to not r
 Please provide your analysis. Use the `git_grep_search_tool` and `read_file_tool` if you need to find specific code snippets or understand file contents. If you are not confident in your plan, request more grep searches by populating `additional_grep_queries_needed`.
 """
         
-        tools = []
+        tools: List[Callable] = []
         if git_grep_search_tool:
             tools.append(git_grep_search_tool)
         if read_file_tool:
@@ -310,7 +310,7 @@ class CliManager:
                 return  # Error already logged
 
             if not analysis.relevant_files and not analysis.plan_for_advice:
-                logging.info("AI analysis resulted in no plan or relevant files. The advice may be generic. Proceeding...")
+                logging.warning("AI analysis resulted in no relevant files to read. The advice may be generic. Proceeding...")
                 break
 
             # C. User Confirmation
