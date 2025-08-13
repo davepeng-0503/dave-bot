@@ -1,5 +1,7 @@
 This repository contains a suite of AI-powered developer assistant tools designed to automate parts of the software development lifecycle. The tools are built in Python and leverage Google's Gemini 2.5 series of models via the `pydantic-ai` library to understand and manipulate code within a git repository.
 
+This repository will use strictly Gemini-2.5 flash or pro models.
+
 There are two primary agents:
 
 1.  **Code Agent (`code_agent.py`)**:

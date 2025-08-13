@@ -474,16 +474,7 @@ class CliManager:
 
                     if current_analysis.additional_grep_queries_needed:
                         analysis_retries += 1
-                        logging.info("🤖 AI has requested more information via git grep to improve its plan.")
-                        print("\nThe AI wants to run the following grep queries to build a better plan:")
-                        for query in current_analysis.additional_grep_queries_needed:
-                            print(f"  - git grep -i -n \"{query}\"")
-                        
-                        if not self.args.force:
-                            proceed = input("\nProceed with running these grep commands? (y/n): ").lower()
-                            if proceed != 'y':
-                                logging.warning("User cancelled grep search. Aborting analysis.")
-                                return
+                        logging.info("🤖 AI has requested more information via git grep to improve its plan. Running queries automatically.")
 
                         new_results = []
                         for query in current_analysis.additional_grep_queries_needed:
