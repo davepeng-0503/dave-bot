@@ -451,7 +451,7 @@ class CliManager:
             return False
 
     def _create_pull_request(self, branch_name: str, title: str, body: str) -> bool:
-        """Creates a pull request using the GitHub CLI 'gh'."""
+        """Creates a pull request using the GitHub CLI 'gh' and opens it in the browser."""
         try:
             subprocess.run(["gh", "--version"], check=True, capture_output=True, text=True)
         except (FileNotFoundError, subprocess.CalledProcessError):
@@ -479,18 +479,25 @@ class CliManager:
             )
             pr_url = result.stdout.strip()
             self._log_info(f"Successfully created pull request: {pr_url}", icon="✅")
+            self._log_info("Opening pull request in your browser...", icon="🌐")
+            webbrowser.open(pr_url)
             return True
         except subprocess.CalledProcessError as e:
             if "a pull request for" in e.stderr and "already exists" in e.stderr:
                 self._log_warning(f"A pull request for branch '{branch_name}' already exists.")
                 try:
-                    pr_list_cmd = ["gh", "pr", "list", "--head", branch_name, "--json", "url"]
+                    # Check for an existing open PR
+                    pr_list_cmd = ["gh", "pr", "list", "--head", branch_name, "--json", "url", "--state", "open"]
                     pr_list_result = subprocess.run(pr_list_cmd, cwd=self.args.dir, capture_output=True, text=True, check=True)
                     pr_info = json.loads(pr_list_result.stdout)
                     if pr_info:
-                        self._log_info(f"Existing PR URL: {pr_info[0]['url']}")
+                        pr_url = pr_info[0]['url']
+                        self._log_info(f"Opening existing PR: {pr_url}", icon="🌐")
+                        webbrowser.open(pr_url)
+                    else:
+                        self._log_warning("Could not find an open PR for this branch to open.")
                 except Exception as find_e:
-                    self._log_warning(f"Could not retrieve existing PR URL: {find_e}")
+                    self._log_warning(f"Could not retrieve or open existing PR URL: {find_e}")
                 return True
             
             self._log_error(f"Failed to create pull request: {e.stderr}")
