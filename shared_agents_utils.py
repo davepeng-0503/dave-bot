@@ -125,29 +125,6 @@ def write_file_content(directory: str, file_path: str, content: str) -> None:
         logging.error(f"❌ Error writing to file {full_path}: {e}")
 
 
-def read_file_for_agent_tool(directory: str, file_path: str) -> str:
-    """
-    A wrapper around read_file_content designed for agent tools.
-
-    It reads a file and returns its content formatted with a header.
-    If reading fails, it returns a descriptive error message string.
-
-    Args:
-        directory: The base directory of the project.
-        file_path: The relative path to the file.
-
-    Returns:
-        The formatted file content as a string, or an error message string.
-    """
-    logging.info(f"Agent tool reading file: {file_path}")
-    content = read_file_content(directory, file_path)
-    if content is None:
-        # read_file_content already logs the specific error
-        return f"Error: Could not read file '{file_path}'. It might not exist or there was a reading error."
-
-    return f"--- Content of {file_path} ---\n{content}"
-
-
 # --- Agent Tool Models and Functions ---
 
 class GitGrepSearchInput(BaseModel):
@@ -158,33 +135,60 @@ class ReadFileContentInput(BaseModel):
     """Input model for the read file content tool."""
     file_path: str = Field(description="The path of the file to read.")
 
-def git_grep_search(directory: str, query: str) -> str:
-    """
-    Performs a case-insensitive 'git grep' search in the codebase.
-    This function is intended to be used as a tool by AI agents.
-    """
-    logging.info(f"🛠️ Running git grep search for: '{query}' in '{directory}'")
-    try:
-        result = subprocess.run(
-            ['git', 'grep', '-i', '-n', query],
-            cwd=directory,
-            capture_output=True,
-            text=True,
-            check=False
-        )
-        if result.returncode == 0:
-            return f"Git grep results for '{query}':\n{result.stdout}"
-        elif result.returncode == 1:
-            return f"No results found for '{query}'."
-        else:
-            logging.error(f"Error during git grep: {result.stderr}")
-            return f"Error executing git grep: {result.stderr}"
-    except FileNotFoundError:
-        logging.error("❌ 'git' command not found. Is Git installed?")
-        return "Error: 'git' command not found. Cannot perform search."
-    except Exception as e:
-        logging.error(f"An unexpected error occurred during git grep: {e}")
-        return f"An unexpected error occurred: {e}"
+
+class AgentTools:
+    """A class to provide tools to AI agents, with a fixed project directory."""
+
+    def __init__(self, directory: str):
+        """
+        Initializes the tools with the project's base directory.
+
+        Args:
+            directory: The absolute path to the project's root directory.
+        """
+        self.directory = directory
+
+    def git_grep_search(self, query: str) -> str:
+        """
+        Performs a case-insensitive 'git grep' search in the codebase.
+        This function is intended to be used as a tool by AI agents.
+        """
+        logging.info(f"🛠️ Running git grep search for: '{query}' in '{self.directory}'")
+        try:
+            result = subprocess.run(
+                ['git', 'grep', '-i', '-n', query],
+                cwd=self.directory,
+                capture_output=True,
+                text=True,
+                check=False
+            )
+            if result.returncode == 0:
+                return f"Git grep results for '{query}':\n{result.stdout}"
+            elif result.returncode == 1:
+                return f"No results found for '{query}'."
+            else:
+                logging.error(f"Error during git grep: {result.stderr}")
+                return f"Error executing git grep: {result.stderr}"
+        except FileNotFoundError:
+            logging.error("❌ 'git' command not found. Is Git installed?")
+            return "Error: 'git' command not found. Cannot perform search."
+        except Exception as e:
+            logging.error(f"An unexpected error occurred during git grep: {e}")
+            return f"An unexpected error occurred: {e}"
+
+    def read_file(self, file_path: str) -> str:
+        """
+        Reads a file and returns its content formatted with a header.
+        If reading fails, it returns a descriptive error message string.
+        This is a tool for an AI agent.
+        """
+        logging.info(f"Agent tool reading file: {file_path}")
+        content = read_file_content(self.directory, file_path)
+        if content is None:
+            # read_file_content already logs the specific error
+            return f"Error: Could not read file '{file_path}'. It might not exist or there was a reading error."
+
+        return f"--- Content of {file_path} ---\n{content}"
 
 
 # --- Base AI Agent ---

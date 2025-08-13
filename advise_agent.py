@@ -13,11 +13,11 @@ from pydantic_ai import Agent
 from pydantic_ai.models.google import GoogleModelSettings
 
 from shared_agents_utils import (
+    AgentTools,
     BaseAiAgent,
     build_context_from_dict,
     get_git_files,
     read_file_content,
-    read_file_for_agent_tool,
     wait_for_user_approval_from_browser,
 )
 
@@ -50,13 +50,6 @@ class AdviceAnalysis(BaseModel):
         description="A list of additional 'git grep' queries that you believe would significantly improve your confidence in the plan. If you are less than 90% confident, you should request more information via grep. Leave empty if you are confident."
     )
 
-class GitGrepSearchInput(BaseModel):
-    """Input model for the git grep search tool."""
-    query: str = Field(description="The keyword or regex pattern to search for within the git repository.")
-
-class ReadFileContentInput(BaseModel):
-    """Input model for the read file content tool."""
-    file_path: str = Field(description="The path of the file to read.")
 
 class Advice(BaseModel):
     """Represents the final generated advice."""
@@ -417,6 +410,7 @@ class CliManager:
         """Initializes the CLI manager and the AI advise agent."""
         self.ai_agent = AiAdviseAgent()
         self.args = self._parse_args()
+        self.agent_tools = AgentTools(self.args.dir)
 
     def _parse_args(self) -> argparse.Namespace:
         """Parses command-line arguments."""
@@ -442,36 +436,6 @@ class CliManager:
             help=f"The port to run the local web server on for user approval (default: {DEFAULT_SERVER_PORT})."
         )
         return parser.parse_args()
-
-    def _read_file_content_tool(self, file_path: str) -> str:
-        """Reads the full content of a specific file within the project directory."""
-        logging.info(f"🛠️ Agent requested to read file: '{file_path}'")
-        return read_file_for_agent_tool(self.args.dir, file_path)
-
-    def _git_grep_search_tool(self, query: str) -> str:
-        """Performs a case-insensitive 'git grep' search in the codebase."""
-        logging.info(f"🛠️ Running git grep search for: '{query}'")
-        try:
-            result = subprocess.run(
-                ['git', 'grep', '-i', '-n', query],
-                cwd=self.args.dir,
-                capture_output=True,
-                text=True,
-                check=False
-            )
-            if result.returncode == 0:
-                return f"Git grep results for '{query}':\n{result.stdout}"
-            elif result.returncode == 1:
-                return f"No results found for '{query}'."
-            else:
-                logging.error(f"Error during git grep: {result.stderr}")
-                return f"Error executing git grep: {result.stderr}"
-        except FileNotFoundError:
-            logging.error("❌ 'git' command not found. Is Git installed?")
-            return "Error: 'git' command not found. Cannot perform search."
-        except Exception as e:
-            logging.error(f"An unexpected error occurred during git grep: {e}")
-            return f"An unexpected error occurred: {e}"
 
     def _get_all_repository_files(self) -> List[str]:
         """Gets all tracked and untracked files in the repository."""
@@ -676,8 +640,8 @@ class CliManager:
                     app_desc_content,
                     feedback=user_feedback,
                     previous_plan=previous_analysis,
-                    git_grep_search_tool=self._git_grep_search_tool,
-                    read_file_tool=self._read_file_content_tool
+                    git_grep_search_tool=self.agent_tools.git_grep_search,
+                    read_file_tool=self.agent_tools.read_file
                 )
                 user_feedback = None
             else:
@@ -689,15 +653,15 @@ class CliManager:
                         self.args.task,
                         all_repo_files,
                         app_desc_content,
-                        git_grep_search_tool=self._git_grep_search_tool,
-                        read_file_tool=self._read_file_content_tool,
+                        git_grep_search_tool=self.agent_tools.git_grep_search,
+                        read_file_tool=self.agent_tools.read_file,
                         grep_results=grep_results or None
                     )
 
                     if current_analysis.additional_grep_queries_needed:
                         analysis_retries += 1
                         logging.info("🤖 AI has requested more information via git grep. Running queries.")
-                        new_results = [self._git_grep_search_tool(q) for q in current_analysis.additional_grep_queries_needed]
+                        new_results = [self.agent_tools.git_grep_search(q) for q in current_analysis.additional_grep_queries_needed]
                         grep_results = "\n\n".join(new_results)
                         analysis = None
                     else:

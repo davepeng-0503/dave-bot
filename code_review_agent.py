@@ -4,13 +4,14 @@ import json
 import logging
 import os
 import subprocess
-from typing import Dict, List, Literal, Optional, Tuple
+from typing import Callable, Dict, List, Literal, Optional, Tuple
 
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
 from pydantic_ai.models.google import GoogleModelSettings
 
 from shared_agents_utils import (
+    AgentTools,
     BaseAiAgent,
     build_context_from_dict,
     get_git_files,
@@ -19,6 +20,7 @@ from shared_agents_utils import (
 
 # --- Configuration ---
 MAX_REANALYSIS_RETRIES = 3
+MAX_ANALYSIS_GREP_RETRIES = 3
 
 
 # --- Pydantic Models for Code Review ---
@@ -54,6 +56,10 @@ class ReviewAnalysis(BaseModel):
     reasoning: str = Field(
         description="A brief explanation of why these files were chosen for review and context."
     )
+    additional_grep_queries_needed: List[str] = Field(
+        default=[],
+        description="A list of additional 'git grep' queries that you believe would significantly improve your confidence in the plan. If you are less than 90% confident, you should request more information via grep. Leave empty if you are confident."
+    )
 
 
 # --- Core Logic for AI Interaction ---
@@ -62,31 +68,35 @@ class AiCodeReviewAgent(BaseAiAgent):
     """Handles all AI interactions for conducting a code review."""
 
     def get_review_analysis(
-        self, task: str, all_files: List[str], changed_files: List[str], app_description: str = "", feedback: Optional[str] = None
+        self, task: str, all_files: List[str], changed_files: List[str], app_description: str = "", feedback: Optional[str] = None, git_grep_search_tool: Optional[Callable] = None, read_file_tool: Optional[Callable] = None, grep_results: Optional[str] = None
     ) -> ReviewAnalysis:
         """Determines which files to review and which are needed for context."""
         system_prompt = f"""
-You are an expert software developer planning a code review. Your goal is to analyze a list of changed files 
-and the overall project structure to determine which files are essential to review and which other files are needed for context.
+You are an expert software developer planning a code review. Your goal is to analyze a list of changed files and the overall project structure to determine which files are essential to review and which other files are needed for context. Your aim is to be at least 90% confident in your plan.
+
+**You have access to these tools**:
+1.  **`git_grep_search_tool(query: str)`**: Helps you find relevant code snippets and file locations. Use it to explore the codebase to understand the impact of changes.
+2.  **`read_file_tool(file_path: str)`**: Reads the entire content of a specific file. Use this when you need more context than `grep` can provide.
+
+**The Process**:
+1.  **Analyze Changes**: Based on the changed files and the task description, determine which files need a detailed review (`files_to_review`).
+2.  **Identify Context**: Determine `relevant_context_files` needed to understand the changes.
+3.  **Verify with Tools**: Use `git_grep_search_tool` and `read_file_tool` to confirm your file choices and understand relationships in the code. You can call these tools multiple times within a single turn.
+4.  **Assess Confidence**: After your initial analysis and tool use, assess your confidence.
+    - **If Confidence < 90%**: If you feel you're missing information, populate `additional_grep_queries_needed` with new search terms. If you do this, do not populate the other fields in the `ReviewAnalysis` object.
+    - **If Confidence >= 90%**: If you are confident, leave `additional_grep_queries_needed` empty and provide the full `ReviewAnalysis`.
 
 Project Description:
 ---
 {app_description or "No description provided."}
 ---
-
-Your task is to populate the `ReviewAnalysis` object based on the user's request (or PR description) and the file lists.
-
-- `files_to_review`: This should generally be the list of changed files. However, you can add other files if the task description strongly implies they are part of the logical change and need scrutiny.
-- `relevant_context_files`: This is crucial. Include any files that help understand the impact and correctness of the changes. Think about files that import the changed modules, modules that are imported by the changed files, related tests, or documentation.
-
-Provide a clear `reasoning` for your choices.
 """
         if feedback:
             system_prompt += f"""
 ---
 IMPORTANT: This is a re-analysis. A previous review attempt failed due to insufficient context.
 The reviewer's feedback was: "{feedback}"
-Please adjust your file selection. You MUST add more files to `relevant_context_files` to satisfy the context request.
+Please adjust your file selection. You MUST add more files to `relevant_context_files` to satisfy the context request. You should not need to ask for more grep queries.
 ---
 """
         prompt = f"""
@@ -97,15 +107,39 @@ List of changed files for this review:
 {json.dumps(changed_files, indent=2)}
 
 The task or pull request description is: "{task}"
-
-Please provide your analysis of which files to review and which to use for context.
 """
+        if grep_results:
+            prompt += f"""
+---
+You previously requested more information to increase your confidence. Here are the results of the 'git grep' commands you asked for:
+{grep_results}
+---
+Now, please provide your final analysis. You should be confident enough to not require more grep queries. If you still lack confidence, it is better to make a best-effort plan than to ask for more information again.
+"""
+        else:
+            prompt += """
+Please provide your analysis. Use the `git_grep_search_tool` and `read_file_tool` if you need to find specific code snippets or understand file contents. If you are not confident in your plan, request more grep searches by populating `additional_grep_queries_needed`.
+"""
+        
+        tools = []
+        if git_grep_search_tool:
+            tools.append(git_grep_search_tool)
+        if read_file_tool:
+            tools.append(read_file_tool)
+
         analysis_agent = Agent(
             self._get_gemini_model("gemini-1.5-flash"),
             output_type=ReviewAnalysis,
             system_prompt=system_prompt,
+            tools=tools
         )
-        log_message = "🤖 Conducting initial review analysis..." if not feedback else f"🔁 Re-analyzing review plan with feedback: {feedback}"
+        
+        log_message = "🤖 Conducting initial review analysis..."
+        if feedback:
+            log_message = f"🔁 Re-analyzing review plan with feedback: {feedback}"
+        elif grep_results:
+            log_message = "🤔 Re-evaluating plan with new grep results..."
+
         logging.info(log_message)
         
         analysis = analysis_agent.run_sync(
@@ -183,6 +217,7 @@ class ReviewCliManager:
         self.args = self._parse_arguments()
         self.ai_agent = AiCodeReviewAgent()
         self.directory = self.args.dir
+        self.agent_tools = AgentTools(self.directory)
 
     def _parse_arguments(self) -> argparse.Namespace:
         """Parses command-line arguments for the code review agent."""
@@ -324,7 +359,10 @@ class ReviewCliManager:
             if feedback_for_reanalysis:
                 logging.info("--- Re-running Analysis with Feedback ---")
                 analysis = self.ai_agent.get_review_analysis(
-                    self.args.task, all_git_files, original_changed_files, app_desc_content, feedback=feedback_for_reanalysis
+                    self.args.task, all_git_files, original_changed_files, app_desc_content, 
+                    feedback=feedback_for_reanalysis,
+                    git_grep_search_tool=self.agent_tools.git_grep_search,
+                    read_file_tool=self.agent_tools.read_file
                 )
                 self._print_analysis_plan(analysis)
                 files_to_process = analysis.files_to_review
@@ -398,10 +436,40 @@ class ReviewCliManager:
                 logging.info("No local changes detected. Exiting.")
             return
 
-        analysis = self.ai_agent.get_review_analysis(
-            self.args.task, all_git_files, changed_files, app_desc_content
-        )
+        # Analysis loop with grep for confidence
+        analysis: Optional[ReviewAnalysis] = None
+        grep_results = ""
+        analysis_retries = 0
+        while analysis_retries < MAX_ANALYSIS_GREP_RETRIES:
+            current_analysis = self.ai_agent.get_review_analysis(
+                self.args.task,
+                all_git_files,
+                changed_files,
+                app_desc_content,
+                git_grep_search_tool=self.agent_tools.git_grep_search,
+                read_file_tool=self.agent_tools.read_file,
+                grep_results=grep_results or None
+            )
+
+            if current_analysis.additional_grep_queries_needed:
+                analysis_retries += 1
+                logging.info("🤖 AI has requested more information via git grep to improve its review plan. Running queries.")
+                
+                new_results = []
+                for query in current_analysis.additional_grep_queries_needed:
+                    result = self.agent_tools.git_grep_search(query)
+                    new_results.append(result)
+                
+                grep_results = "\n\n".join(new_results)
+                analysis = None
+            else:
+                analysis = current_analysis
+                break
         
+        if not analysis:
+            logging.error(f"❌ Failed to get a confident analysis from the AI after {MAX_ANALYSIS_GREP_RETRIES} attempts.")
+            return
+
         self._print_analysis_plan(analysis)
 
         if not analysis.files_to_review:
