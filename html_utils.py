@@ -8,15 +8,15 @@ to display plans, gather feedback, and show results.
 
 import logging
 import tempfile
-from typing import List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, List, Optional
 
 import markdown
 
-# Use TYPE_CHECKING to avoid circular imports at runtime. The agent files
-# will import this module, and this module needs type hints from them.
+# Use TYPE_CHECKING to avoid circular imports at runtime.
+# The agent files will import this module, and this module needs type hints from them.
 if TYPE_CHECKING:
     from advise_agent import Advice, AdviceAnalysis
-    from code_agent import CodeAnalysis, NewFile, GeneratedCode
+    from code_agent import CodeAnalysis, GeneratedCode, NewFile
 
 
 # --- Shared HTML Components ---
@@ -269,6 +269,27 @@ COMMON_STYLE = """
         color: #555;
         font-weight: 500;
     }
+
+    .progress-bar-container {
+        width: 100%;
+        background-color: #e0e6ed;
+        border-radius: 8px;
+        margin-top: 1rem;
+        margin-bottom: 1.5rem;
+        overflow: hidden; /* To keep the inner bar's corners rounded */
+    }
+
+    .progress-bar {
+        width: 0%;
+        height: 24px;
+        background-color: var(--primary-color);
+        transition: width 0.5s ease-in-out;
+        text-align: center;
+        line-height: 24px;
+        color: white;
+        font-weight: 500;
+        font-size: 0.9em;
+    }
 </style>
 """
 
@@ -318,6 +339,8 @@ def create_code_plan_html(analysis: "CodeAnalysis", task: str, port: int) -> Opt
     if not analysis:
         return None
 
+    plan_html = "".join([f'<li>{markdown.markdown(step, extensions=["fenced_code", "tables"])}</li>' for step in analysis.plan])
+
     html_content = f"""
 <!DOCTYPE html>
 <html lang="en">
@@ -339,7 +362,7 @@ def create_code_plan_html(analysis: "CodeAnalysis", task: str, port: int) -> Opt
         <div class="container">
             <h2>High-level Plan</h2>
             <ol>
-                {''.join([f'<li>{step}</li>' for step in analysis.plan]) if analysis.plan else "<li>No plan provided.</li>"}
+                {plan_html if analysis.plan else "<li>No plan provided.</li>"}
             </ol>
         </div>
 
@@ -396,6 +419,8 @@ def create_code_plan_html(analysis: "CodeAnalysis", task: str, port: int) -> Opt
     <script>
         const port = {port};
         const mainContent = document.getElementById('main-content');
+        const totalFiles = {len(analysis.generation_order) if analysis.generation_order else 0};
+        let completedFiles = 0;
 
         function escapeHtml(unsafe) {{
             if (typeof unsafe !== 'string') {{
@@ -441,6 +466,14 @@ def create_code_plan_html(analysis: "CodeAnalysis", task: str, port: int) -> Opt
                         logContainer.appendChild(writingElement);
 
                     }} else if (data.status === 'done') {{
+                        completedFiles++;
+                        const percentage = totalFiles > 0 ? Math.round((completedFiles / totalFiles) * 100) : 0;
+                        const progressBar = document.getElementById('generation-progress-bar');
+                        if (progressBar) {{
+                            progressBar.style.width = `${{percentage}}%`;
+                            progressBar.textContent = `${{percentage}}% Complete`;
+                        }}
+
                         const elementId = `writing-${{data.file_path.replace(/[^a-zA-Z0-9]/g, '-')}}`;
                         const writingElement = document.getElementById(elementId);
                         if (writingElement) {{
@@ -460,6 +493,11 @@ def create_code_plan_html(analysis: "CodeAnalysis", task: str, port: int) -> Opt
                         logContainer.appendChild(doneElement);
 
                     }} else if (data.status === 'finished') {{
+                        const progressBar = document.getElementById('generation-progress-bar');
+                        if (progressBar) {{
+                            progressBar.style.width = '100%';
+                            progressBar.textContent = '100% Complete';
+                        }}
                         const finishedElement = document.createElement('p');
                         finishedElement.style.marginTop = '1rem';
                         finishedElement.style.color = 'var(--success-color)';
@@ -486,18 +524,21 @@ def create_code_plan_html(analysis: "CodeAnalysis", task: str, port: int) -> Opt
                 generationContainer.className = 'container';
                 generationContainer.innerHTML = `
                     <h2>⚙️ Code Generation Progress</h2>
+                    <div class="progress-bar-container">
+                        <div class="progress-bar" id="generation-progress-bar" style="width: 0%;">0%</div>
+                    </div>
                     <div id="generation-log">
                         <p>Waiting for generation to start...</p>
                     </div>
                 `;
                 
+                const useFlash = document.getElementById('use-flash-model').checked;
                 if (actionsContainer) {{
                     actionsContainer.parentNode.replaceChild(generationContainer, actionsContainer);
                 }} else {{
                     mainContent.appendChild(generationContainer);
                 }}
                 
-                const useFlash = document.getElementById('use-flash-model').checked;
                 fetch(`http://localhost:${{port}}/approve`, {{
                     method: 'POST',
                     headers: {{ 'Content-Type': 'application/json' }},
