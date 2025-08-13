@@ -8,7 +8,7 @@ to display plans, gather feedback, and show results.
 
 import logging
 import tempfile
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Optional
 
 import markdown
 
@@ -16,7 +16,6 @@ import markdown
 # The agent files will import this module, and this module needs type hints from them.
 if TYPE_CHECKING:
     from advise_agent import Advice, AdviceAnalysis
-    from code_agent import CodeAnalysis, NewFile
 
 
 # --- Shared HTML Components ---
@@ -306,24 +305,16 @@ COMMON_STYLE = """
         background-color: var(--primary-color);
         top: 0;
         bottom: 0;
-        left: 50%;
+        left: 30px;
         margin-left: -2px;
         border-radius: 2px;
     }
 
     .timeline-item {
-        padding: 10px 40px;
+        padding: 10px 0 10px 70px;
         position: relative;
         background-color: inherit;
-        width: 50%;
-    }
-
-    .timeline-item.left {
-        left: 0;
-    }
-
-    .timeline-item.right {
-        left: 50%;
+        width: 100%;
     }
 
     .timeline-item::after {
@@ -331,16 +322,12 @@ COMMON_STYLE = """
         position: absolute;
         width: 20px;
         height: 20px;
-        right: -11px;
+        left: 19px;
         background-color: white;
         border: 4px solid var(--primary-color);
         top: 25px;
         border-radius: 50%;
         z-index: 1;
-    }
-
-    .timeline-item.right::after {
-        left: -9px;
     }
 
     .timeline-content {
@@ -429,7 +416,7 @@ def create_code_agent_html_viewer(port: int) -> Optional[str]:
                                 <div class="progress-bar animated" style="width: 100%; background-color: var(--primary-color);">Thinking...</div>
                             </div>
                             <div id="tool-log" class="timeline">
-                                <div class="timeline-item left placeholder">
+                                <div class="timeline-item placeholder">
                                     <div class="timeline-content">
                                         <h3>🚀 Process Started</h3>
                                         <p>Waiting for the agent to begin analysis...</p>
@@ -534,7 +521,7 @@ def create_code_agent_html_viewer(port: int) -> Optional[str]:
                         <div class="progress-bar" id="generation-progress-bar" style="width: 0%;">0%</div>
                     </div>
                     <div id="generation-log" class="timeline">
-                         <div class="timeline-item left placeholder">
+                         <div class="timeline-item placeholder">
                             <div class="timeline-content">
                                 <h3>🚀 Process Started</h3>
                                 <p>Waiting for the agent to begin generating files...</p>
@@ -628,9 +615,8 @@ def create_code_agent_html_viewer(port: int) -> Optional[str]:
                 logContainer.innerHTML = '';
             }}
 
-            const side = state.timelineItemCounter % 2 === 0 ? 'left' : 'right';
             const toolItem = document.createElement('div');
-            toolItem.className = `timeline-item ${{side}}`;
+            toolItem.className = "timeline-item";
             toolItem.innerHTML = `
                 <div class="timeline-content">
                     <h3>🛠️ Tool Used: <code>${{escapeHtml(data.tool_name)}}</code></h3>
@@ -651,12 +637,11 @@ def create_code_agent_html_viewer(port: int) -> Optional[str]:
             }}
 
             if (data.status === 'writing') {{
-                const side = state.timelineItemCounter % 2 === 0 ? 'left' : 'right';
                 const elementId = `item-${{data.file_path.replace(/[^a-zA-Z0-9]/g, '-')}}`;
                 
                 const timelineItem = document.createElement('div');
                 timelineItem.id = elementId;
-                timelineItem.className = `timeline-item ${{side}}`;
+                timelineItem.className = "timeline-item";
                 timelineItem.innerHTML = `
                     <div class="timeline-content">
                         <h3>⏳ Generating File...</h3>
@@ -698,9 +683,8 @@ def create_code_agent_html_viewer(port: int) -> Optional[str]:
                     progressBar.textContent = '100% Complete';
                 }}
 
-                const side = state.timelineItemCounter % 2 === 0 ? 'left' : 'right';
                 const finishedItem = document.createElement('div');
-                finishedItem.className = `timeline-item ${{side}}`;
+                finishedItem.className = "timeline-item";
                 finishedItem.innerHTML = `
                     <div class="timeline-content" style="background-color: var(--success-color); color: white;">
                         <h3>🎉 Process Finished!</h3>
@@ -713,9 +697,9 @@ def create_code_agent_html_viewer(port: int) -> Optional[str]:
 
         function sendDecision(decision) {{
             if (decision === 'approve') {{
+                const useFlash = document.getElementById('use-flash-model').checked;
                 renderGenerationView();
                 
-                const useFlash = document.getElementById('use-flash-model').checked;
                 
                 fetch(`http://localhost:${{port}}/approve`, {{
                     method: 'POST',
