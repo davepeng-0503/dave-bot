@@ -573,14 +573,21 @@ def create_code_agent_html_viewer(port: int) -> Optional[str]:
 
         function handleStatusUpdate(data) {{
             const newStatus = data.status;
+            const oldStatus = state.status;
+
             // Don't re-render for every single status if the view doesn't change
-            if (newStatus === state.status && !['tool_used', 'writing', 'done'].includes(newStatus)) return;
+            if (newStatus === oldStatus && !['tool_used', 'writing', 'done'].includes(newStatus)) return;
 
             state.status = newStatus;
 
             switch (newStatus) {{
                 case 'planning':
-                    if (!document.getElementById('planning-view')) {{
+                    // If we get a 'planning' status when we were in 'plan_ready',
+                    // it means we're re-planning based on feedback.
+                    if (oldStatus === 'plan_ready') {{
+                        renderPlanningView('Re-analyzing with your feedback...');
+                    }} else {{
+                        // This handles the initial planning view
                         renderPlanningView();
                     }}
                     break;
@@ -740,7 +747,8 @@ def create_code_agent_html_viewer(port: int) -> Optional[str]:
             }})
             .then(res => {{
                 if (!res.ok) throw new Error('Feedback request failed');
-                renderPlanningView('Re-analyzing with your feedback...');
+                // The backend will now send a 'planning' status, which pollStatus will pick up.
+                // The view transition is now handled by handleStatusUpdate.
             }})
             .catch(err => {{
                 showMessage('Error', 'Could not submit feedback. Please check the agent console.', true);
