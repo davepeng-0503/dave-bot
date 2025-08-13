@@ -3,17 +3,14 @@
 Utilities shared across different AI agents, including file operations,
 base AI agent configuration, and context management.
 """
+import hashlib
 import logging
 import os
 import subprocess
 from typing import Callable, Dict, List, Optional
 
 from dotenv import load_dotenv
-from google.genai.types import (
-    HarmBlockThreshold,
-    HarmCategory,
-    SafetySettingDict,
-)
+from google.genai.types import HarmBlockThreshold, HarmCategory, SafetySettingDict
 from pydantic_ai import Agent
 from pydantic_ai.models.google import GoogleModel, GoogleModelSettings
 from pydantic_ai.providers.google import GoogleProvider
@@ -133,6 +130,7 @@ class BaseAiAgent:
     """
     summarizer_agent: Agent
     api_key: str
+    summaries_cache: Dict[str, str]
 
     def __init__(self):
         """
@@ -145,6 +143,7 @@ class BaseAiAgent:
             raise ValueError(
                 "GOOGLE_API_KEY is not set. Please create a .env file and add it."
             )
+        self.summaries_cache = {}
 
         # Create a cached summarizer agent for performance.
         summarizer_system_prompt = """
@@ -195,6 +194,8 @@ Mention any important logic or side effects. The summary should be concise and i
     def summarize_code(self, file_path: str, code_content: str) -> str:
         """
         Summarizes a single file's code content using a cached AI model.
+        Caches the summary against a hash of the content to avoid re-summarizing
+        the same content.
 
         Args:
             file_path: The path of the file being summarized (for context).
@@ -203,6 +204,11 @@ Mention any important logic or side effects. The summary should be concise and i
         Returns:
             A string containing the AI-generated summary.
         """
+        content_hash = hashlib.md5(code_content.encode("utf-8")).hexdigest()
+        if content_hash in self.summaries_cache:
+            logging.info(f"📝 Reusing cached summary for {file_path}")
+            return self.summaries_cache[content_hash]
+
         prompt = f"Please summarize the following code from the file `{file_path}`:\n\n{code_content}"
 
         logging.info(f"📝 Summarizing code in {file_path}...")
@@ -212,7 +218,9 @@ Mention any important logic or side effects. The summary should be concise and i
                 google_safety_settings=self.get_safety_settings()
             ),
         )
-        return summary.output
+        summary_output = summary.output
+        self.summaries_cache[content_hash] = summary_output
+        return summary_output
 
 
 # --- Context Management ---
