@@ -742,19 +742,36 @@ def create_code_agent_html_viewer(port: int) -> Optional[str]:
                     progressBar.textContent = `${{Math.round(percentage)}}%`;
                 }}
 
+                // 1. Update the original "writing" item to a "complete" state.
                 const elementId = `item-${{data.file_path.replace(/[^a-zA-Z0-9]/g, '-')}}`;
                 const timelineItem = document.getElementById(elementId);
                 
                 if (timelineItem) {{
                     timelineItem.innerHTML = `
                         <div class="timeline-content">
-                            <h3>✅ File Complete: <code>${{escapeHtml(data.file_path)}}</code></h3>
+                            <h3>✅ Generation Complete</h3>
+                            <code>${{escapeHtml(data.file_path)}}</code>
+                        </div>
+                    `;
+                }}
+
+                // 2. Add a new timeline item with the details.
+                const logContainer = document.getElementById('generation-log');
+                if (logContainer) {{
+                    const detailsItem = document.createElement('div');
+                    detailsItem.className = "timeline-item";
+                    // No need for an ID on this one.
+                    detailsItem.innerHTML = `
+                        <div class="timeline-content">
+                            <h3>📝 Summary for <code>${{escapeHtml(data.file_path)}}</code></h3>
                             <h4>Summary of Changes</h4>
                             <p>${{escapeHtml(data.summary || 'No summary provided.')}}</p>
                             <h4>Reasoning for Changes</h4>
                             <blockquote>${{escapeHtml(data.reasoning || 'No reasoning provided.')}}</blockquote>
                         </div>
                     `;
+                    logContainer.appendChild(detailsItem);
+                    state.timelineItemCounter++;
                 }}
 
             }} else if (data.status === 'finished') {{
