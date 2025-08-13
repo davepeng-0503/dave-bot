@@ -517,20 +517,56 @@ class CliManager:
             logging.warning(f"Could not get untracked git files: {e}. Proceeding with tracked files only.")
             return git_files
 
-    def _validate_analysis(self, analysis: CodeAnalysis) -> bool:
-        """Validates the AI's plan for consistency."""
+    def _reconcile_and_validate_analysis(self, analysis: CodeAnalysis, all_repo_files: List[str]) -> bool:
+        """
+        Validates and reconciles the AI's plan. It treats `generation_order` as the source of truth
+        and adjusts `files_to_edit` and `files_to_create` to match it, ensuring consistency.
+        """
+        if not analysis:
+            logging.error("Cannot validate a null analysis.")
+            return False
+
         planned_files: Set[str] = set(analysis.files_to_edit) | {f.file_path for f in analysis.files_to_create}
         ordered_files: Set[str] = set(analysis.generation_order)
 
-        if planned_files != ordered_files:
-            logging.error("Analysis Error: Mismatch between files to change and the generation order.")
-            missing_from_order = planned_files - ordered_files
-            extra_in_order = ordered_files - planned_files
-            if missing_from_order:
-                logging.error(f"  - Planned but not in order: {missing_from_order}")
-            if extra_in_order:
-                logging.error(f"  - In order but not planned: {extra_in_order}")
-            return False
+        if planned_files == ordered_files:
+            return True  # No mismatch, nothing to do.
+
+        logging.warning("Analysis Warning: Mismatch found between planned files and generation order. Reconciling lists using 'generation_order' as the source of truth.")
+
+        new_files_to_edit = []
+        new_files_to_create = []
+        
+        # Keep existing NewFile objects if they are in the generation order
+        existing_creations = {f.file_path: f for f in analysis.files_to_create}
+
+        for file_path in analysis.generation_order:
+            # We need to check if the file exists in the repo to decide if it's an edit or create.
+            # The `all_repo_files` list includes all tracked and untracked files.
+            if file_path in all_repo_files:
+                if file_path not in new_files_to_edit:
+                    new_files_to_edit.append(file_path)
+            else:
+                # It's a file to be created.
+                if file_path in existing_creations:
+                    # Preserve the detailed NewFile object if it exists
+                    new_files_to_create.append(existing_creations[file_path])
+                else:
+                    # Create a placeholder NewFile object
+                    logging.warning(f"  - File '{file_path}' from generation_order was not in files_to_create. Adding it.")
+                    new_files_to_create.append(NewFile(
+                        file_path=file_path,
+                        reasoning="File was added to the plan to match the generation order."
+                    ))
+        
+        # Log what was removed from the original plan
+        for file_path in planned_files - ordered_files:
+            logging.warning(f"  - File '{file_path}' was in the original plan but not in generation_order. Removing it.")
+
+        analysis.files_to_edit = sorted(new_files_to_edit)
+        analysis.files_to_create = sorted(new_files_to_create, key=lambda f: f.file_path)
+        
+        logging.info("✅ Analysis plan reconciled successfully.")
         return True
 
     def _format_files_to_create_html(self, files_to_create: List[NewFile]) -> str:
@@ -937,11 +973,16 @@ class CliManager:
                     logging.error(f"❌ Failed to get a confident analysis after {MAX_ANALYSIS_GREP_RETRIES} attempts.")
                     return
 
-            # B. Display Analysis and get confirmation
+            # B. Reconcile analysis and get user confirmation
+            if not self._reconcile_and_validate_analysis(analysis, all_repo_files):
+                logging.error("Failed to reconcile the analysis plan. Aborting.")
+                return
+
             logging.info("✅ Analysis complete. Awaiting user confirmation in browser.")
             plan_html_path = self._create_and_open_plan_html(analysis)
-            if not plan_html_path or not self._validate_analysis(analysis):
+            if not plan_html_path:
                 return
+            
             if not analysis.generation_order:
                 logging.info("AI analysis resulted in no files to change. Exiting.")
                 return
