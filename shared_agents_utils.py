@@ -120,6 +120,29 @@ def write_file_content(directory: str, file_path: str, content: str) -> None:
         logging.error(f"❌ Error writing to file {full_path}: {e}")
 
 
+def read_file_for_agent_tool(directory: str, file_path: str) -> str:
+    """
+    A wrapper around read_file_content designed for agent tools.
+
+    It reads a file and returns its content formatted with a header.
+    If reading fails, it returns a descriptive error message string.
+
+    Args:
+        directory: The base directory of the project.
+        file_path: The relative path to the file.
+
+    Returns:
+        The formatted file content as a string, or an error message string.
+    """
+    logging.info(f"Agent tool reading file: {file_path}")
+    content = read_file_content(directory, file_path)
+    if content is None:
+        # read_file_content already logs the specific error
+        return f"Error: Could not read file '{file_path}'. It might not exist or there was a reading error."
+    
+    return f"--- Content of {file_path} ---\n{content}"
+
+
 # --- Base AI Agent ---
 
 
@@ -164,7 +187,7 @@ Mention any important logic or side effects. The summary should be concise and i
         Configures and returns a specific Gemini model instance.
 
         Args:
-            model_name: The name of the Gemini model to use (e.g., 'gemini-1.5-pro').
+            model_name: The name of the Gemini model to use (e.g., 'gemini-2.5-pro').
             temperature: The creativity of the model, from 0.0 to 1.0.
 
         Returns:

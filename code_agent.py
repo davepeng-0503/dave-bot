@@ -4,7 +4,7 @@ import json
 import logging
 import os
 import subprocess
-from typing import Dict, List, Optional, Set
+from typing import Callable, Dict, List, Optional, Set
 
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
@@ -15,11 +15,13 @@ from shared_agents_utils import (
     build_context_from_dict,
     get_git_files,
     read_file_content,
+    read_file_for_agent_tool,
     write_file_content,
 )
 
 # --- Configuration ---
 MAX_REANALYSIS_RETRIES = 3
+MAX_ANALYSIS_GREP_RETRIES = 3
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -38,6 +40,10 @@ class NewFile(BaseModel):
 
 class CodeAnalysis(BaseModel):
     """Represents the initial analysis of the codebase for a given task."""
+    plan: List[str] = Field(
+        default=[],
+        description="A detailed, step-by-step plan of what needs to be done to accomplish the task."
+    )
     relevant_files: List[str] = Field(
         default=[],
         description="A list of existing file paths that are most relevant to read for understanding the context."
@@ -58,10 +64,19 @@ class CodeAnalysis(BaseModel):
         default="",
         description="A brief, high-level explanation of the overall strategy, why these files were chosen, and why the generation order is correct."
     )
+    additional_grep_queries_needed: List[str] = Field(
+        default=[],
+        description="A list of additional 'git grep' queries that you believe would significantly improve your confidence in the plan. If you are less than 90% confident, you should request more information via grep. Leave empty if you are confident."
+    )
+
 
 class GitGrepSearchInput(BaseModel):
     """Input model for the git grep search tool."""
     query: str = Field(description="The keyword or regex pattern to search for within the git repository.")
+
+class ReadFileContentInput(BaseModel):
+    """Input model for the read file content tool."""
+    file_path: str = Field(description="The path of the file to read.")
 
 class GeneratedCode(BaseModel):
     """Represents the AI-generated code for a single file."""
@@ -87,66 +102,41 @@ class GeneratedCode(BaseModel):
 class AiCodeAgent(BaseAiAgent):
     """Handles all interactions with the Gemini AI model."""
 
-    def get_initial_analysis(self, task: str, file_list: List[str], directory: str, app_description: str = "", feedback: Optional[str] = None) -> CodeAnalysis:
+    def get_initial_analysis(self, task: str, file_list: List[str], app_description: str = "", feedback: Optional[str] = None, git_grep_search_tool: Optional[Callable] = None, read_file_tool: Optional[Callable] = None, grep_results: Optional[str] = None) -> CodeAnalysis:
         """Runs the agent to get the code analysis, potentially using feedback or a search tool."""
         
-        def git_grep_search_tool(query: str) -> str:
-            """
-            Performs a case-insensitive 'git grep' search in the codebase to find relevant files.
-            Returns a list of files and line numbers containing the query.
-            """
-            logging.info(f"🛠️ Running git grep search for: '{query}'")
-            try:
-                result = subprocess.run(
-                    ['git', 'grep', '-i', '-n', query],
-                    cwd=directory,
-                    capture_output=True,
-                    text=True,
-                    check=False
-                )
-                if result.returncode == 0:
-                    return f"Git grep results for '{query}':\n{result.stdout}"
-                elif result.returncode == 1:
-                    return f"No results found for '{query}'."
-                else:
-                    logging.error(f"Error during git grep: {result.stderr}")
-                    return f"Error executing git grep: {result.stderr}"
-            except FileNotFoundError:
-                logging.error("❌ 'git' command not found. Is Git installed?")
-                return "Error: 'git' command not found. Cannot perform search."
-            except Exception as e:
-                logging.error(f"An unexpected error occurred during git grep: {e}")
-                return f"An unexpected error occurred: {e}"
-
         system_prompt = f"""
-You are an expert software developer planning a coding task. Your goal is to analyze a project's file structure 
-to determine which files are relevant, which need editing, which new files to create, and the correct order of operations.
+You are an expert software developer planning a coding task. Your goal is to create a comprehensive plan to modify a codebase.
 
-**You have access to a tool: `git_grep_search_tool`**.
+**Your Goal**: Create a `CodeAnalysis` response. Your aim is to be at least 90% confident in your plan.
 
-- **When to use the tool**: Use this tool if the file list is large, or the task description contains specific keywords, function names, or variable names. This helps you pinpoint relevant code. For example, if the task is "add a new endpoint to the user API", a good search query would be "user_api" or "app.route('/api/user'".
-- **How to use the tool**: Call the tool with a single `query` string.
-- **After using the tool**: Use the search results to populate the `relevant_files` and `files_to_edit` fields accurately.
-- **If you don't need the tool**: If the file list is small and you can easily identify the correct files, you don't need to use the tool. Just provide the `CodeAnalysis` directly.
+**You have access to these tools**:
+1.  **`git_grep_search_tool(query: str)`**: Helps you find relevant code snippets and file locations. Use it to explore the codebase.
+2.  **`read_file_tool(file_path: str)`**: Reads the entire content of a specific file. Use this when you need more context than `grep` can provide.
+
+**The Process**:
+1.  **Formulate a Plan**: Based on the task, create a step-by-step `plan`.
+2.  **Identify Files**: Determine `files_to_edit`, `files_to_create`, and `relevant_files` for context.
+3.  **Verify with Tools**: Use `git_grep_search_tool` and `read_file_tool` to confirm your file choices and understand the code. You can call these tools multiple times within a single turn.
+4.  **Assess Confidence**: After your initial analysis and tool use, assess your confidence.
+    - **If Confidence < 90%**: If you feel you're missing information or your plan is too speculative, populate `additional_grep_queries_needed` with new search terms that would help you build a better plan. If you do this, do not populate the other fields in the `CodeAnalysis` object.
+    - **If Confidence >= 90%**: If you are confident, leave `additional_grep_queries_needed` empty and provide the full `CodeAnalysis`, including the `plan`, file lists, and `generation_order`.
+
+**CRITICAL**:
+- **`plan`**: This should be a detailed, step-by-step description of the changes you will make.
+- **`generation_order`**: This is the most important part of your execution plan. It must list all files from `files_to_edit` and `files_to_create` in the correct dependency order.
 
 Project Description:
 ---
 {app_description or "No description provided."}
 ---
-
-Your task is to populate the CodeAnalysis object based on the user's request and the provided file list.
-
-**CRITICAL**: You must determine the correct `generation_order`. This is the most important part of your plan.
-List all file paths from `files_to_edit` and `files_to_create` in the specific sequence they should be processed.
-The order must respect dependencies. For example, if you create `new_module.py` and then modify `main.py` to import and use it, the `generation_order` MUST be `['new_module.py', 'main.py']`.
-Explain your reasoning for this order in the `reasoning` field.
 """
         if feedback:
             system_prompt += f"""
 ---
 IMPORTANT: This is a re-analysis. A previous attempt failed due to insufficient context.
 The programmer's feedback was: "{feedback}"
-Please adjust your file selection and plan. You might need to use the `git_grep_search_tool` or add more files to `relevant_files` to satisfy the context request.
+Please adjust your file selection and plan. You might need to use your tools or add more files to `relevant_files` to satisfy the context request. You must provide a full plan this time and not ask for more grep queries.
 ---
 """
 
@@ -155,16 +145,39 @@ Full list of files in the repository:
 {json.dumps(file_list, indent=2)}
 
 My task is: "{task}"
-
-Please provide your analysis. Use the `git_grep_search_tool` if you need to find specific code snippets.
 """
+        if grep_results:
+            prompt += f"""
+---
+You previously requested more information to increase your confidence. Here are the results of the 'git grep' commands you asked for:
+{grep_results}
+---
+Now, please provide your final analysis. You should be confident enough to not require more grep queries. If you still lack confidence, it is better to make a best-effort plan than to ask for more information again.
+"""
+        else:
+            prompt += """
+Please provide your analysis. Use the `git_grep_search_tool` and `read_file_tool` if you need to find specific code snippets or understand file contents. If you are not confident in your plan, request more grep searches by populating `additional_grep_queries_needed`.
+"""
+        
+        tools = []
+        if git_grep_search_tool:
+            tools.append(git_grep_search_tool)
+        if read_file_tool:
+            tools.append(read_file_tool)
+
         analysis_agent = Agent(
             self._get_gemini_model('gemini-2.5-flash'),
             output_type=CodeAnalysis,
             system_prompt=system_prompt,
-            tools=[git_grep_search_tool]
+            tools=tools
         )
-        log_message = "🤖 Conducting initial codebase analysis..." if not feedback else f"🔁 Re-analyzing codebase with feedback: {feedback}"
+        
+        log_message = "🤖 Conducting initial codebase analysis..."
+        if feedback:
+            log_message = f"🔁 Re-analyzing codebase with feedback: {feedback}"
+        elif grep_results:
+            log_message = "🤔 Re-evaluating plan with new grep results..."
+
         logging.info(log_message)
         
         analysis = analysis_agent.run_sync(
@@ -266,6 +279,43 @@ class CliManager:
         parser.set_defaults(strict=True)
         return parser.parse_args()
 
+    def _read_file_content_tool(self, file_path: str) -> str:
+        """
+        Reads the full content of a specific file within the project directory.
+        This is a tool for the AI agent.
+        """
+        logging.info(f"🛠️ Agent requested to read file: '{file_path}'")
+        # Using the wrapper from shared_agents_utils which handles errors and formatting
+        return read_file_for_agent_tool(self.args.dir, file_path)
+
+    def _git_grep_search_tool(self, query: str) -> str:
+        """
+        Performs a case-insensitive 'git grep' search in the codebase to find relevant files.
+        Returns a list of files and line numbers containing the query.
+        """
+        logging.info(f"🛠️ Running git grep search for: '{query}'")
+        try:
+            result = subprocess.run(
+                ['git', 'grep', '-i', '-n', query],
+                cwd=self.args.dir,
+                capture_output=True,
+                text=True,
+                check=False
+            )
+            if result.returncode == 0:
+                return f"Git grep results for '{query}':\n{result.stdout}"
+            elif result.returncode == 1:
+                return f"No results found for '{query}'."
+            else:
+                logging.error(f"Error during git grep: {result.stderr}")
+                return f"Error executing git grep: {result.stderr}"
+        except FileNotFoundError:
+            logging.error("❌ 'git' command not found. Is Git installed?")
+            return "Error: 'git' command not found. Cannot perform search."
+        except Exception as e:
+            logging.error(f"An unexpected error occurred during git grep: {e}")
+            return f"An unexpected error occurred: {e}"
+
     def _get_all_repository_files(self) -> List[str]:
         """Gets all tracked and untracked files in the repository."""
         git_files = get_git_files(self.args.dir)
@@ -313,7 +363,7 @@ class CliManager:
             if feedback_for_reanalysis:
                 logging.info("--- Re-running Analysis with Feedback ---")
                 analysis = self.ai_agent.get_initial_analysis(
-                    self.args.task, all_repo_files, self.args.dir, app_desc_content, feedback=feedback_for_reanalysis
+                    self.args.task, all_repo_files, app_desc_content, feedback=feedback_for_reanalysis, git_grep_search_tool=self._git_grep_search_tool, read_file_tool=self._read_file_content_tool
                 )
                 files_to_process = analysis.generation_order
                 feedback_for_reanalysis = ""  # Reset feedback
@@ -386,14 +436,60 @@ class CliManager:
             logging.error("No tracked or untracked files found. Exiting.")
             return
 
-        # 2. Initial Analysis
-        analysis = self.ai_agent.get_initial_analysis(
-            self.args.task, all_repo_files, self.args.dir, app_desc_content
-        )
-        
+        # 2. Iterative Analysis to get a confident plan
+        analysis = None
+        grep_results = ""
+        analysis_retries = 0
+
+        while analysis_retries < MAX_ANALYSIS_GREP_RETRIES:
+            current_analysis = self.ai_agent.get_initial_analysis(
+                self.args.task,
+                all_repo_files,
+                app_desc_content,
+                git_grep_search_tool=self._git_grep_search_tool,
+                read_file_tool=self._read_file_content_tool,
+                grep_results=grep_results or None
+            )
+
+            if current_analysis.additional_grep_queries_needed:
+                analysis_retries += 1
+                logging.info("🤖 AI has requested more information via git grep to improve its plan.")
+                print("\nThe AI wants to run the following grep queries to build a better plan:")
+                for query in current_analysis.additional_grep_queries_needed:
+                    print(f"  - git grep -i -n \"{query}\"")
+                
+                if not self.args.force:
+                    proceed = input("\nProceed with running these grep commands? (y/n): ").lower()
+                    if proceed != 'y':
+                        logging.warning("User cancelled grep search. Aborting analysis.")
+                        return
+
+                new_results = []
+                for query in current_analysis.additional_grep_queries_needed:
+                    result = self._git_grep_search_tool(query)
+                    new_results.append(result)
+                
+                grep_results = "\n\n".join(new_results)
+                analysis = None  # Not a final analysis
+            else:
+                analysis = current_analysis
+                break  # We have a final analysis
+
+        if not analysis:
+            logging.error(f"❌ Failed to get a confident analysis from the AI after {MAX_ANALYSIS_GREP_RETRIES} attempts.")
+            return
+
+        # 3. Display Analysis & User Confirmation
         print("\n--- 🤖 AI Code Analysis Result ---")
         print(f"Task: {self.args.task}\n")
-        print(f"Overall Reasoning:\n {analysis.reasoning}\n")
+        print("High-level Plan:")
+        if analysis.plan:
+            for i, step in enumerate(analysis.plan, 1):
+                print(f"  {i}. {step}")
+        else:
+            print("  No plan provided.")
+        
+        print(f"\nOverall Reasoning:\n {analysis.reasoning}\n")
         print("Relevant Files for Context:", analysis.relevant_files or "None")
         print("Files to Edit:", analysis.files_to_edit or "None")
         print("Files to Create:", [f.file_path for f in analysis.files_to_create] or "None")
@@ -407,17 +503,17 @@ class CliManager:
             logging.info("AI analysis resulted in no files to change. Exiting.")
             return
 
-        # 3. User Confirmation
+        # 4. User Confirmation
         if not self.args.force:
             proceed = input("Proceed with generating and writing file changes? (y/n): ").lower()
             if proceed != 'y':
                 logging.info("Operation cancelled by user.")
                 return
 
-        # 4. Iterative Generation
+        # 5. Iterative Generation
         unprocessed_files = self._execute_generation_loop(analysis, all_repo_files, app_desc_content)
 
-        # 5. Final Status
+        # 6. Final Status
         self._report_final_status(unprocessed_files)
 
 
