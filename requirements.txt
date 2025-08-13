@@ -3,3 +3,4 @@ pydantic
 pydantic-ai
 python-dotenv
 markdown
+Flask
