@@ -754,7 +754,7 @@ def create_code_agent_html_viewer(port: int, all_repo_files: List[str]) -> Optio
             const oldStatus = state.status;
 
             // Allow certain event-like statuses to be processed repeatedly.
-            if (newStatus === oldStatus && !['tool_used', 'writing', 'done', 'cli_log'].includes(newStatus)) return;
+            if (newStatus === oldStatus && !['tool_used', 'writing', 'done', 'cli_log', 'plan_updated'].includes(newStatus)) return;
 
             state.status = newStatus;
 
@@ -773,6 +773,13 @@ def create_code_agent_html_viewer(port: int, all_repo_files: List[str]) -> Optio
                     renderPlanReviewView();
                     break;
                 
+                case 'plan_updated':
+                    state.totalFiles = data.new_total_files;
+                    const filesHtml = data.files_added.map(f => `<code>${{escapeHtml(f)}}</code>`).join(', ');
+                    const message = `Agent requested to add ${{data.files_added.length}} file(s) to the plan: ${{filesHtml}}. The total number of files to process is now ${{state.totalFiles}}.`;
+                    addGenericTimelineItem(message, '🔄', 'warning');
+                    break;
+
                 case 'writing':
                 case 'done':
                 case 'finished':

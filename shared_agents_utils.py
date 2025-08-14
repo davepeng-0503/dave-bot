@@ -161,7 +161,7 @@ class AgentTools:
             self.status_queue.put({
                 "status": "tool_used",
                 "tool_name": "git_grep_search",
-                "tool_input": query,
+                "tool_input": {"query": query},
             })
         try:
             result = subprocess.run(
@@ -197,7 +197,7 @@ class AgentTools:
             self.status_queue.put({
                 "status": "tool_used",
                 "tool_name": "read_file",
-                "tool_input": file_path,
+                "tool_input": {"file_path": file_path},
             })
         content = read_file_content(self.directory, file_path)
         if content is None:

@@ -211,7 +211,7 @@ Please provide your analysis. Use the `git_grep_search_tool` and `read_file_tool
         )
         return analysis.output
 
-    def generate_file_content(self, task: str, context: str, file_path: str, all_repo_files: List[str], generation_order: List[str], original_content: Optional[str] = None, strict: bool = True, use_flash_model: bool = False) -> GeneratedCode:
+    def generate_file_content(self, task: str, context: str, file_path: str, all_repo_files: List[str], generation_order: List[str], edited_files: List[str], original_content: Optional[str] = None, strict: bool = True, use_flash_model: bool = False) -> GeneratedCode:
         """Generates the full code for a given file."""
         action = "editing" if original_content is not None else "creating"
         
@@ -223,9 +223,12 @@ you will generate the full, production-ready code for the specified file path.
 **IMPORTANT RULES**:
 1.  Your output must be the complete, raw code for the file. Do not include markdown backticks (```python ... ```) or any other explanations in the `code` field.
 2.  The code should be well-structured, follow best practices, and be ready for integration.
-3.  You must also provide a concise `summary` of the changes and a `reasoning` for why these changes were made.
-4.  {"You must only make code changes directly related to completion of the task, refactors and cleaning up should not be prioritised unless specifically part of the task given" if strict else "You may make other changes as you see fit to improve code maintainability and clarity."}
-5.  **Context Management**:
+3.  If you are unsure of how to implement something. Do not fill out the code, summary or reasoning fields. Instead, set `requires_more_context` to `true` and provide a clear `user_request` explaining what additional information you need.
+4.  If you believe after generating this file that another file not included must be edited you may make requests to change the plan by requesting to add files to the generation queue.
+5.  You must also provide a concise `summary` of the changes and a `reasoning` for why these changes were made.
+6.  {"You must only make code changes directly related to completion of the task, refactors and cleaning up should not be prioritised unless specifically part of the task given" if strict else "You may make other changes as you see fit to improve code maintainability and clarity."}
+7.  You must not generate mocks or stubs for functions that are being imported from other files. If you need to use a function that is not defined in the current file, you must ensure it is imported correctly. If you are unable to do this, you must request more context.
+8.  **Context Management**:
     a. **If you cannot generate the code for `{file_path}` due to insufficient context**: Set `requires_more_context` to `true`, leave `code` empty, and explain what you need in `context_request`.
     b. **If you can generate the code for `{file_path}` but you anticipate needing more context for FUTURE files**: Generate the code for the current file. Then, populate the `needed_context_for_future_files` list with the full paths of any other files you will need to see to complete subsequent steps. This is crucial for efficiency.
 """
@@ -235,7 +238,8 @@ Overall Task: "{task}"
 Full list of files in the repository:
 {json.dumps(all_repo_files, indent=2)}
 
-Remaining generation order: {generation_order}
+All files edited in this session: {json.dumps(edited_files)}
+After this file is generated the following files will also be generated keep that in mind: {json.dumps(generation_order)}
 
 Context from other relevant files in the project:
 ---
@@ -542,6 +546,7 @@ class CliManager:
         context_data: Dict[str, str] = {}
         feedback_for_reanalysis = ""
         retries = 0
+        edited_files: List[str] = []
 
         while files_to_process and retries <= MAX_REANALYSIS_RETRIES:
             if feedback_for_reanalysis:
@@ -571,7 +576,7 @@ class CliManager:
                 
                 generated_code = self.ai_agent.generate_file_content(
                     self.args.task, context_str, file_path, all_repo_files,
-                    remaining_order, context_data.get(file_path), strict=self.args.strict,
+                    remaining_order, edited_files, context_data.get(file_path), strict=self.args.strict,
                     use_flash_model=analysis.use_flash_model
                 )
 
@@ -593,6 +598,8 @@ class CliManager:
 
                 context_data[file_path] = generated_code.code  # Update context for next file in this loop
                 processed_in_loop.append(file_path)
+                if file_path not in edited_files:
+                    edited_files.append(file_path)
 
                 # Dynamically load more context if requested for future files
                 if generated_code.needed_context_for_future_files:
@@ -747,7 +754,7 @@ class CliManager:
                                     self._log_info(f"Model selection overridden by user. 'Use Gemini Flash' is now set to: {analysis.use_flash_model}")
                             
                             # Handle additional context files
-                            additional_files = data.get('additional_context_files', [])
+                            additional_files: List[str] = data.get('additional_context_files', [])
                             if additional_files:
                                 self._log_info(f"User added {len(additional_files)} files to context: {additional_files}")
                                 # Add to relevant_files, avoiding duplicates
