@@ -109,6 +109,10 @@ class GeneratedCode(BaseModel):
         default=[],
         description="A list of additional file paths that should be added to the context for subsequent file generation steps. Use this even if you were able to generate the current file successfully. Provide file paths from the full list of repository files."
     )
+    add_to_generation_queue: List[str] = Field(
+        default=[],
+        description="A list of file paths (new or existing) that you believe need to be generated or regenerated to complete the task. You can use this to add files that were missed in the initial plan, or to revisit a file you have already generated if you realize a change is needed."
+    )
 
 
 # --- Core Logic for AI Interaction ---
@@ -230,7 +234,7 @@ you will generate the full, production-ready code for the specified file path.
 1.  Your output must be the complete, raw code for the file. Do not include markdown backticks (```python ... ```) or any other explanations in the `code` field.
 2.  The code should be well-structured, follow best practices, and be ready for integration.
 3.  If you are unsure of how to implement something. Do not fill out the code, summary or reasoning fields. Instead, set `requires_more_context` to `true` and provide a clear `user_request` explaining what additional information you need.
-4.  If you believe after generating this file that another file not included must be edited you may make requests to change the plan by requesting to add files to the generation queue.
+4.  If you believe after generating this file that another file not included must be edited or a file needs to be revisited, you may request to add it to the generation queue by populating the `add_to_generation_queue` field with a list of file paths.
 5.  You must also provide a concise `summary` of the changes and a `reasoning` for why these changes were made.
 6.  {"You must only make code changes directly related to completion of the task, refactors and cleaning up should not be prioritised unless specifically part of the task given" if strict else "You may make other changes as you see fit to improve code maintainability and clarity."}
 7.  You must not generate mocks or stubs for functions that are being imported from other files. If you need to use a function that is not defined in the current file, you must ensure it is imported correctly. If you are unable to do this, you must request more context.
@@ -548,7 +552,7 @@ class CliManager:
         Manages the iterative process of generating code, handling context, and re-analyzing on failure.
         Returns a list of files that were not successfully processed.
         """
-        files_to_process = analysis.generation_order
+        files_to_process = list(analysis.generation_order)
         context_data: Dict[str, str] = {}
         feedback_for_reanalysis = ""
         retries = 0
@@ -560,7 +564,7 @@ class CliManager:
                 analysis = self.ai_agent.get_initial_analysis(
                     self.args.task, all_repo_files, app_desc_content, feedback=feedback_for_reanalysis, previous_plan=analysis, git_grep_search_tool=self.agent_tools.git_grep_search, read_file_tool=self.agent_tools.read_file
                 )
-                files_to_process = analysis.generation_order
+                files_to_process = list(analysis.generation_order)
                 feedback_for_reanalysis = ""  # Reset feedback
 
             # Pre-load context for the current batch of files
@@ -574,10 +578,15 @@ class CliManager:
             processed_in_loop: List[str] = []
             reanalysis_needed = False
 
-            for file_path in files_to_process:
+            # Use an index-based loop to allow modification of files_to_process during iteration
+            i = 0
+            while i < len(files_to_process):
+                file_path = files_to_process[i]
+                i += 1 # Increment early, so we can `continue` or `break`
+
                 self.status_queue.put({"status": "writing", "file_path": file_path})
 
-                remaining_order = [f for f in files_to_process if f not in processed_in_loop]
+                remaining_order = files_to_process[i:]
                 context_str = build_context_from_dict(context_data, self.ai_agent.summarize_code, exclude_file=file_path)
                 
                 generated_code = self.ai_agent.generate_file_content(
@@ -615,9 +624,31 @@ class CliManager:
                             content = read_file_content(self.args.dir, new_context_file)
                             if content:
                                 context_data[new_context_file] = content
+                
+                # Dynamically add files to the generation queue
+                if generated_code.add_to_generation_queue:
+                    files_to_add = generated_code.add_to_generation_queue
+                    self._log_info(f"Agent requested to add {len(files_to_add)} file(s) to the generation queue: {files_to_add}")
+                    
+                    # Add new files to the end of the processing list and master plan
+                    files_to_process.extend(files_to_add)
+                    analysis.generation_order.extend(files_to_add)
+                    
+                    self.status_queue.put({
+                        "status": "plan_updated",
+                        "files_added": files_to_add,
+                        "new_total_files": len(analysis.generation_order)
+                    })
 
             # Update the list of files to process for the next iteration
-            files_to_process = [f for f in files_to_process if f not in processed_in_loop]
+            # This logic is now tricky because we used an index-based loop.
+            # If reanalysis was needed, we need to figure out the remaining files.
+            if reanalysis_needed:
+                # The files from `i` onwards are the ones not yet processed in this attempt.
+                files_to_process = files_to_process[i-1:]
+            else:
+                # The loop completed successfully
+                files_to_process = []
 
             if not reanalysis_needed:
                 break  # Exit while loop if all files processed successfully
