@@ -558,7 +558,7 @@ def create_code_agent_html_viewer(port: int, all_repo_files: List[str]) -> Optio
                 </div>
                 <div class="container">
                     <h2>Overall Reasoning</h2>
-                    <p>${{escapeHtml(plan.reasoning) || "No reasoning provided."}}</p>
+                    <p>${{plan.reasoning || "No reasoning provided."}}</p>
                 </div>
                 <div class="container">
                     <h2>File Breakdown</h2>
@@ -650,7 +650,7 @@ def create_code_agent_html_viewer(port: int, all_repo_files: List[str]) -> Optio
             item.className = "timeline-item";
             item.innerHTML = `
                 <div class="timeline-content ${{cssClass || ''}}">
-                    <h3>${{icon || 'ℹ️'}} ${{escapeHtml(message)}}</h3>
+                    <h3>${{icon || 'ℹ️'}} ${{message}}</h3>
                 </div>
             `;
             logContainer.appendChild(item);
@@ -660,8 +660,8 @@ def create_code_agent_html_viewer(port: int, all_repo_files: List[str]) -> Optio
         function showMessage(title, message, isError = false) {{
             mainContainer.innerHTML = `
                 <div class="container">
-                    <h1 style="${{isError ? 'color: var(--danger-color);' : ''}}">${{escapeHtml(title)}}</h1>
-                    <p>${{escapeHtml(message)}}</p>
+                    <h1 style="${{isError ? 'color: var(--danger-color);' : ''}}">${{title}}</h1>
+                    <p>${{message}}</p>
                 </div>`;
         }}
 
@@ -873,9 +873,9 @@ def create_code_agent_html_viewer(port: int, all_repo_files: List[str]) -> Optio
                         <div class="timeline-content">
                             <h3>📝 Summary for <code>${{escapeHtml(data.file_path)}}</code></h3>
                             <h4>Summary of Changes</h4>
-                            <p>${{escapeHtml(data.summary || 'No summary provided.')}}</p>
+                            <p>${{data.summary || 'No summary provided.'}}</p>
                             <h4>Reasoning for Changes</h4>
-                            <blockquote>${{escapeHtml(data.reasoning || 'No reasoning provided.')}}</blockquote>
+                            <blockquote>${{data.reasoning || 'No reasoning provided.'}}</blockquote>
                         </div>
                     `;
                     logContainer.appendChild(detailsItem);
@@ -1023,7 +1023,7 @@ def create_advice_analysis_html(
 
         <div class="container">
             <h2>High-level Plan for Advice</h2>
-                {''.join([f'{markdown.markdown(step)}' for step in analysis.plan_for_advice]) if analysis.plan_for_advice else "<li>No plan provided.</li>"}
+                {markdown.markdown(' '.join(analysis.plan_for_advice)) if analysis.plan_for_advice else "<li>No plan provided.</li>"}
         </div>
 
         <div class="container">
