@@ -85,6 +85,10 @@ class CodeAnalysis(BaseModel):
         default=False,
         description="Set to true if the task is simple (e.g., minor text changes, version bumps, simple refactors) and can be handled by a faster, less powerful model for code generation. For complex tasks, leave as false."
     )
+    user_request: str = Field(
+        default="",
+        description="If you are blocked and need to ask the user a clarifying question to proceed, state your question here. The user will provide an answer, and you will be re-run with their response. Only use this if you are blocked."
+    )
 
 
 class GeneratedCode(BaseModel):
@@ -138,15 +142,17 @@ You are an expert software developer planning a coding task. Your goal is to cre
 2.  **Formulate a Plan**: Based on the task, create a step-by-step `plan`.
 3.  **Identify Files**: Determine `files_to_edit`, `files_to_create`, and `relevant_files` for context.
 4.  **Verify with Tools**: Use `git_grep_search_tool` and `read_file_tool` to confirm your file choices and understand the code. You can call these tools multiple times within a single turn.
-5.  **Assess Confidence**: After your initial analysis and tool use, assess your confidence.
-    - **If Confidence < 90%**: If you feel you are missing information or your plan is too speculative, populate `additional_grep_queries_needed` with new search terms that would help you build a better plan. If you do this, do not populate the other fields in the `CodeAnalysis` object.
-    - **If Confidence >= 90%**: If you are confident, leave `additional_grep_queries_needed` empty and provide the full `CodeAnalysis`, including the `branch_name`, `plan`, file lists, and `generation_order`.
+5.  **Assess Confidence and Information Gaps**:
+    - **If Blocked by Lack of User Intent**: If you cannot proceed because the user's request is ambiguous or requires a decision from them, populate `user_request` with a clear, concise question for the user. Do not populate any other fields.
+    - **If Lacking Codebase Context**: If you are not blocked, but your confidence is < 90% because you need more information about the existing code, populate `additional_grep_queries_needed` with new search terms. Do not populate any other fields.
+    - **If Confident (>= 90%)**: If you are confident, provide the full `CodeAnalysis`. Leave `user_request` and `additional_grep_queries_needed` empty.
 
 **CRITICAL**:
 - **`branch_name`**: Must be a valid git branch name.
 - **`plan`**: This should be a detailed, step-by-step description of the changes you will make.
 - **`generation_order`**: This is the most important part of your execution plan. It must list all files from `files_to_edit` and `files_to_create` in the correct dependency order.
 - **Model Selection**: If the task is very simple (e.g., fixing a typo, updating a version number, a simple one-line change), set `use_flash_model` to `true`. This uses a faster model for code generation. For anything more complex, leave it `false` to use the more powerful model.
+- **Asking Questions**: Use `user_request` for questions about the *task requirements*. Use `additional_grep_queries_needed` for questions about the *existing code*. Only fill out ONE of `user_request`, `additional_grep_queries_needed`, or the full plan.
 
 Project Description:
 ---
@@ -159,7 +165,7 @@ Project Description:
                 prompt_addition += f"\nHere was the previous plan you created:\n{previous_plan.model_dump_json(indent=2)}\n"
             
             prompt_addition += f"\nThe feedback provided is: \"{feedback}\"\n"
-            prompt_addition += "\nPlease create a new, complete plan that addresses the feedback. You must provide a full plan this time and not ask for more grep queries.\n---"
+            prompt_addition += "\nPlease create a new, complete plan that addresses the feedback. Avoid asking for more grep queries or user input unless absolutely necessary.\n---"
             system_prompt += prompt_addition
 
         prompt = f"""
@@ -178,7 +184,7 @@ Now, please provide your final analysis. You should be confident enough to not r
 """
         else:
             prompt += """
-Please provide your analysis. Use the `git_grep_search_tool` and `read_file_tool` if you need to find specific code snippets or understand file contents. If you are not confident in your plan, request more grep searches by populating `additional_grep_queries_needed`.
+Please provide your analysis. Use the `git_grep_search_tool` and `read_file_tool` if you need to find specific code snippets or understand file contents. If you are not confident in your plan, request more grep searches by populating `additional_grep_queries_needed`. If you are blocked by ambiguity in the task, use `user_request`.
 """
         
         tools: List[Callable[..., Any]] = []
@@ -713,7 +719,37 @@ class CliManager:
                         self._log_error(f"Failed to get a confident analysis after {MAX_ANALYSIS_GREP_RETRIES} attempts.")
                         return
 
-                # B. Reconcile analysis
+                # B. Handle user request from AI
+                if analysis.user_request:
+                    self._log_info(f"AI is asking a question: {analysis.user_request}", icon="❓")
+                    if not self.args.force and server:
+                        self.status_queue.put({
+                            "status": "user_input_required",
+                            "request": analysis.user_request
+                        })
+                        decision, data = server.wait_for_decision()
+                        if decision == 'user_input':
+                            user_response = data.get('user_input') if isinstance(data, dict) else None
+                            if user_response:
+                                self._log_info(f"User responded: {user_response}", icon="💬")
+                                user_feedback = f"My previous question was: '{analysis.user_request}'. The user's answer is: '{user_response}'. Please create a plan based on this new information."
+                                previous_analysis = analysis
+                                feedback_loop += 1
+                                server.reset_decision()
+                                continue # Restart the main `while True` loop for re-analysis
+                            else:
+                                self._log_error("User did not provide input. Aborting.")
+                                if server: self.status_queue.put({"status": "error", "message": "User did not provide input."})
+                                return
+                        else:
+                            self._log_error(f"Expected user input, but got decision '{decision}'. Aborting.")
+                            if server: self.status_queue.put({"status": "error", "message": f"Operation cancelled during user input. Decision: {decision}"})
+                            return
+                    else: # --force is on or server not running
+                        self._log_error("AI requested user input in non-interactive mode. Aborting.")
+                        return
+
+                # C. Reconcile analysis
                 if not self._reconcile_and_validate_analysis(analysis, all_repo_files):
                     if server:
                         self.status_queue.put({"status": "error", "message": "Failed to reconcile the analysis plan."})
@@ -726,7 +762,7 @@ class CliManager:
                         self.status_queue.put({"status": "finished", "message": "AI analysis resulted in no files to change."})
                     return
 
-                # C. User Confirmation
+                # D. User Confirmation
                 if not self.args.force and server:
                     self._log_info("Analysis complete. Awaiting user confirmation in browser.", icon="✅")
                     

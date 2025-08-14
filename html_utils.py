@@ -603,6 +603,27 @@ def create_code_agent_html_viewer(port: int, all_repo_files: List[str]) -> Optio
             setupFileAutocomplete();
         }}
 
+        function renderUserInputView(request) {{
+            mainContainer.innerHTML = `
+            <div id="user-input-view" class="view active">
+                <div class="container">
+                    <h1>🤖 AI Agent Needs Your Input</h1>
+                    <div class="container">
+                        <h2>Question from the Agent</h2>
+                        <blockquote>${{escapeHtml(request)}}</blockquote>
+                    </div>
+                    <div class="feedback-form">
+                        <h3>Your Response</h3>
+                        <textarea id="user-input-text" placeholder="Provide your answer here..."></textarea>
+                        <br>
+                        <button class="approve-btn" onclick="sendUserInput()">Submit Response</button>
+                    </div>
+                </div>
+            </div>
+            `;
+            document.getElementById('user-input-text').focus();
+        }}
+
         function renderGenerationView() {{
             state.timelineItemCounter = 0;
             state.completedFiles = 0;
@@ -773,6 +794,10 @@ def create_code_agent_html_viewer(port: int, all_repo_files: List[str]) -> Optio
                     renderPlanReviewView();
                     break;
                 
+                case 'user_input_required':
+                    renderUserInputView(data.request);
+                    break;
+
                 case 'plan_updated':
                     state.totalFiles = data.new_total_files;
                     const filesHtml = data.files_added.map(f => `<code>${{escapeHtml(f)}}</code>`).join(', ');
@@ -975,6 +1000,30 @@ def create_code_agent_html_viewer(port: int, all_repo_files: List[str]) -> Optio
             }});
         }}
 
+        function sendUserInput() {{
+            const userInput = document.getElementById('user-input-text').value;
+            if (!userInput) {{
+                alert('Please provide a response.');
+                return;
+            }}
+            
+            renderPlanningView('Re-analyzing with your input...');
+            
+            const payload = {{
+                user_input: userInput
+            }};
+
+            fetch(`http://localhost:${{port}}/user_input`, {{
+                method: 'POST',
+                headers: {{ 'Content-Type': 'application/json' }},
+                body: JSON.stringify(payload)
+            }})
+            .catch(err => {{
+                showMessage('Error', 'Could not submit your input. Please check the agent console.', true);
+                console.error('Error sending user input:', err);
+            }});
+        }}
+
         // INITIALIZATION
         document.addEventListener('DOMContentLoaded', () => {{
             renderPlanningView();
@@ -1172,7 +1221,7 @@ def create_advice_html(advice: "Advice", question: str) -> Optional[str]:
             mode="w", delete=False, suffix=".html", encoding="utf-8"
         ) as f:
             advice_file_path = f.name
-            f.write(html_content)
+            f.write(advice_file_path)
         logging.info(f"✅ Advice saved to temporary file: {advice_file_path}")
         return advice_file_path
     except Exception as e:

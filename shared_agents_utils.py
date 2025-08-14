@@ -446,7 +446,7 @@ class ApprovalHandler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         """Handles POST requests for user actions."""
-        if self.path in ["/approve", "/reject", "/feedback"]:
+        if self.path in ["/approve", "/reject", "/feedback", "/user_input"]:
             content_length = int(self.headers.get("Content-Length", 0))
             post_data = self.rfile.read(content_length)
 
@@ -460,7 +460,7 @@ class ApprovalHandler(http.server.BaseHTTPRequestHandler):
                     self._send_response(400, "text/plain", b"Invalid JSON")
                     return
 
-            # The payload for 'approve' and 'feedback' is a JSON object.
+            # The payload for 'approve', 'feedback', and 'user_input' is a JSON object.
             # For 'reject', it's empty. In all cases, we pass the data object as is.
             self.server.set_decision(action, data)
 
