@@ -289,6 +289,7 @@ class CliManager:
     """Manages CLI interactions, file I/O, and orchestrates the analysis and code generation."""
 
     status_queue: queue.Queue[Dict[str, Any]]
+    original_branch: str
     
     def __init__(self):
         """Initializes the CLI manager and the AI code agent."""
@@ -297,6 +298,7 @@ class CliManager:
         self.ai_agent = AiCodeAgent(status_queue=self.status_queue)
         # Pass the queue to AgentTools to capture tool usage during analysis
         self.agent_tools = AgentTools(self.args.dir, status_queue=self.status_queue)
+        self.original_branch = ""
 
     def _log_info(self, message: str, icon: str = "ℹ️"):
         logging.info(message)
@@ -509,7 +511,7 @@ class CliManager:
                 "gh", "pr", "create",
                 "--title", title,
                 "--body", body,
-                "--base", "master",
+                "--base", self.original_branch,
                 "--head", branch_name,
             ]
             
@@ -546,6 +548,28 @@ class CliManager:
             
             self._log_error(f"Failed to create pull request: {e.stderr}")
             return False
+
+    def _switch_to_original_branch(self):
+        """Switches back to the original branch if it exists."""
+        if not self.original_branch:
+            self._log_warning("Original branch name not found, cannot switch back.")
+            return
+
+        try:
+            self._log_info(f"Switching back to original branch '{self.original_branch}'...", icon="🌿")
+            subprocess.run(
+                ["git", "checkout", self.original_branch],
+                cwd=self.args.dir,
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            self._log_info(f"Successfully switched back to branch '{self.original_branch}'.", icon="✅")
+        except subprocess.CalledProcessError as e:
+            self._log_error(f"Failed to switch back to branch '{self.original_branch}': {e.stderr}")
+        except FileNotFoundError:
+            self._log_error("'git' command not found. Cannot switch branch.")
 
     def _execute_generation_loop(self, analysis: CodeAnalysis, all_repo_files: List[str], app_desc_content: str) -> List[str]:
         """
@@ -668,6 +692,17 @@ class CliManager:
     def run(self):
         """The main entry point for the CLI tool."""
         # 1. Initial Setup
+        try:
+            original_branch_result = subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=self.args.dir, capture_output=True, text=True, check=True, encoding="utf-8"
+            )
+            self.original_branch = original_branch_result.stdout.strip()
+            self._log_info(f"Original branch is '{self.original_branch}'. This will be the base for the pull request.")
+        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+            self._log_error(f"Could not determine the current git branch: {e}. Aborting.")
+            return
+
         app_desc_content = read_file_content(self.args.dir, self.args.app_description) or ""
         all_repo_files = self._get_all_repository_files()
         if not all_repo_files:
@@ -901,6 +936,10 @@ class CliManager:
                 self._log_info("Shutting down web server.", icon="🔌")
                 server.shutdown()
                 server.server_close()
+            
+            # Switch back to original branch if a new one was created
+            if analysis and self.original_branch and analysis.branch_name != self.original_branch:
+                self._switch_to_original_branch()
 
 
 if __name__ == "__main__":
