@@ -722,9 +722,15 @@ class CliManager:
                 # C. User Confirmation
                 if not self.args.force and server:
                     self._log_info("Analysis complete. Awaiting user confirmation in browser.", icon="✅")
+                    
+                    # Convert markdown fields to HTML for the view
+                    analysis_for_view = analysis.model_copy(deep=True)
+                    analysis_for_view.plan = [markdown.markdown(step) for step in analysis.plan]
+                    analysis_for_view.reasoning = markdown.markdown(analysis.reasoning)
+                    
                     self.status_queue.put({
                         "status": "plan_ready",
-                        "plan": json.loads(analysis.model_dump_json()),
+                        "plan": analysis_for_view.model_dump(),
                         "task": self.args.task
                     })
 
