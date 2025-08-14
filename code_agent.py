@@ -85,6 +85,10 @@ class CodeAnalysis(BaseModel):
         default=False,
         description="Set to true if the task is simple (e.g., minor text changes, version bumps, simple refactors) and can be handled by a faster, less powerful model for code generation. For complex tasks, leave as false."
     )
+    user_request: str = Field(
+        default="",
+        description="If you are blocked and need to ask the user a clarifying question to proceed, state your question here. The user will provide an answer, and you will be re-run with their response. Only use this if you are blocked."
+    )
 
 
 class GeneratedCode(BaseModel):
@@ -138,15 +142,17 @@ You are an expert software developer planning a coding task. Your goal is to cre
 2.  **Formulate a Plan**: Based on the task, create a step-by-step `plan`.
 3.  **Identify Files**: Determine `files_to_edit`, `files_to_create`, and `relevant_files` for context.
 4.  **Verify with Tools**: Use `git_grep_search_tool` and `read_file_tool` to confirm your file choices and understand the code. You can call these tools multiple times within a single turn.
-5.  **Assess Confidence**: After your initial analysis and tool use, assess your confidence.
-    - **If Confidence < 90%**: If you feel you are missing information or your plan is too speculative, populate `additional_grep_queries_needed` with new search terms that would help you build a better plan. If you do this, do not populate the other fields in the `CodeAnalysis` object.
-    - **If Confidence >= 90%**: If you are confident, leave `additional_grep_queries_needed` empty and provide the full `CodeAnalysis`, including the `branch_name`, `plan`, file lists, and `generation_order`.
+5.  **Assess Confidence and Information Gaps**:
+    - **If Blocked by Lack of User Intent**: If you cannot proceed because the user's request is ambiguous or requires a decision from them, populate `user_request` with a clear, concise question for the user. Do not populate any other fields.
+    - **If Lacking Codebase Context**: If you are not blocked, but your confidence is < 90% because you need more information about the existing code, populate `additional_grep_queries_needed` with new search terms. Do not populate any other fields.
+    - **If Confident (>= 90%)**: If you are confident, provide the full `CodeAnalysis`. Leave `user_request` and `additional_grep_queries_needed` empty.
 
 **CRITICAL**:
 - **`branch_name`**: Must be a valid git branch name.
 - **`plan`**: This should be a detailed, step-by-step description of the changes you will make.
 - **`generation_order`**: This is the most important part of your execution plan. It must list all files from `files_to_edit` and `files_to_create` in the correct dependency order.
 - **Model Selection**: If the task is very simple (e.g., fixing a typo, updating a version number, a simple one-line change), set `use_flash_model` to `true`. This uses a faster model for code generation. For anything more complex, leave it `false` to use the more powerful model.
+- **Asking Questions**: Use `user_request` for questions about the *task requirements*. Use `additional_grep_queries_needed` for questions about the *existing code*. Only fill out ONE of `user_request`, `additional_grep_queries_needed`, or the full plan.
 
 Project Description:
 ---
@@ -159,7 +165,7 @@ Project Description:
                 prompt_addition += f"\nHere was the previous plan you created:\n{previous_plan.model_dump_json(indent=2)}\n"
             
             prompt_addition += f"\nThe feedback provided is: \"{feedback}\"\n"
-            prompt_addition += "\nPlease create a new, complete plan that addresses the feedback. You must provide a full plan this time and not ask for more grep queries.\n---"
+            prompt_addition += "\nPlease create a new, complete plan that addresses the feedback. Avoid asking for more grep queries or user input unless absolutely necessary.\n---"
             system_prompt += prompt_addition
 
         prompt = f"""
@@ -178,7 +184,7 @@ Now, please provide your final analysis. You should be confident enough to not r
 """
         else:
             prompt += """
-Please provide your analysis. Use the `git_grep_search_tool` and `read_file_tool` if you need to find specific code snippets or understand file contents. If you are not confident in your plan, request more grep searches by populating `additional_grep_queries_needed`.
+Please provide your analysis. Use the `git_grep_search_tool` and `read_file_tool` if you need to find specific code snippets or understand file contents. If you are not confident in your plan, request more grep searches by populating `additional_grep_queries_needed`. If you are blocked by ambiguity in the task, use `user_request`.
 """
         
         tools: List[Callable[..., Any]] = []
@@ -211,7 +217,7 @@ Please provide your analysis. Use the `git_grep_search_tool` and `read_file_tool
         )
         return analysis.output
 
-    def generate_file_content(self, task: str, context: str, file_path: str, all_repo_files: List[str], generation_order: List[str], original_content: Optional[str] = None, strict: bool = True, use_flash_model: bool = False) -> GeneratedCode:
+    def generate_file_content(self, task: str, context: str, file_path: str, all_repo_files: List[str], generation_order: List[str], edited_files: List[str], original_content: Optional[str] = None, strict: bool = True, use_flash_model: bool = False) -> GeneratedCode:
         """Generates the full code for a given file."""
         action = "editing" if original_content is not None else "creating"
         
@@ -223,9 +229,12 @@ you will generate the full, production-ready code for the specified file path.
 **IMPORTANT RULES**:
 1.  Your output must be the complete, raw code for the file. Do not include markdown backticks (```python ... ```) or any other explanations in the `code` field.
 2.  The code should be well-structured, follow best practices, and be ready for integration.
-3.  You must also provide a concise `summary` of the changes and a `reasoning` for why these changes were made.
-4.  {"You must only make code changes directly related to completion of the task, refactors and cleaning up should not be prioritised unless specifically part of the task given" if strict else "You may make other changes as you see fit to improve code maintainability and clarity."}
-5.  **Context Management**:
+3.  If you are unsure of how to implement something. Do not fill out the code, summary or reasoning fields. Instead, set `requires_more_context` to `true` and provide a clear `user_request` explaining what additional information you need.
+4.  If you believe after generating this file that another file not included must be edited you may make requests to change the plan by requesting to add files to the generation queue.
+5.  You must also provide a concise `summary` of the changes and a `reasoning` for why these changes were made.
+6.  {"You must only make code changes directly related to completion of the task, refactors and cleaning up should not be prioritised unless specifically part of the task given" if strict else "You may make other changes as you see fit to improve code maintainability and clarity."}
+7.  You must not generate mocks or stubs for functions that are being imported from other files. If you need to use a function that is not defined in the current file, you must ensure it is imported correctly. If you are unable to do this, you must request more context.
+8.  **Context Management**:
     a. **If you cannot generate the code for `{file_path}` due to insufficient context**: Set `requires_more_context` to `true`, leave `code` empty, and explain what you need in `context_request`.
     b. **If you can generate the code for `{file_path}` but you anticipate needing more context for FUTURE files**: Generate the code for the current file. Then, populate the `needed_context_for_future_files` list with the full paths of any other files you will need to see to complete subsequent steps. This is crucial for efficiency.
 """
@@ -235,7 +244,8 @@ Overall Task: "{task}"
 Full list of files in the repository:
 {json.dumps(all_repo_files, indent=2)}
 
-Remaining generation order: {generation_order}
+All files edited in this session: {json.dumps(edited_files)}
+After this file is generated the following files will also be generated keep that in mind: {json.dumps(generation_order)}
 
 Context from other relevant files in the project:
 ---
@@ -542,6 +552,7 @@ class CliManager:
         context_data: Dict[str, str] = {}
         feedback_for_reanalysis = ""
         retries = 0
+        edited_files: List[str] = []
 
         while files_to_process and retries <= MAX_REANALYSIS_RETRIES:
             if feedback_for_reanalysis:
@@ -571,7 +582,7 @@ class CliManager:
                 
                 generated_code = self.ai_agent.generate_file_content(
                     self.args.task, context_str, file_path, all_repo_files,
-                    remaining_order, context_data.get(file_path), strict=self.args.strict,
+                    remaining_order, edited_files, context_data.get(file_path), strict=self.args.strict,
                     use_flash_model=analysis.use_flash_model
                 )
 
@@ -593,6 +604,8 @@ class CliManager:
 
                 context_data[file_path] = generated_code.code  # Update context for next file in this loop
                 processed_in_loop.append(file_path)
+                if file_path not in edited_files:
+                    edited_files.append(file_path)
 
                 # Dynamically load more context if requested for future files
                 if generated_code.needed_context_for_future_files:
@@ -706,7 +719,37 @@ class CliManager:
                         self._log_error(f"Failed to get a confident analysis after {MAX_ANALYSIS_GREP_RETRIES} attempts.")
                         return
 
-                # B. Reconcile analysis
+                # B. Handle user request from AI
+                if analysis.user_request:
+                    self._log_info(f"AI is asking a question: {analysis.user_request}", icon="❓")
+                    if not self.args.force and server:
+                        self.status_queue.put({
+                            "status": "user_input_required",
+                            "request": analysis.user_request
+                        })
+                        decision, data = server.wait_for_decision()
+                        if decision == 'user_input':
+                            user_response = data.get('user_input') if isinstance(data, dict) else None
+                            if user_response:
+                                self._log_info(f"User responded: {user_response}", icon="💬")
+                                user_feedback = f"My previous question was: '{analysis.user_request}'. The user's answer is: '{user_response}'. Please create a plan based on this new information."
+                                previous_analysis = analysis
+                                feedback_loop += 1
+                                server.reset_decision()
+                                continue # Restart the main `while True` loop for re-analysis
+                            else:
+                                self._log_error("User did not provide input. Aborting.")
+                                if server: self.status_queue.put({"status": "error", "message": "User did not provide input."})
+                                return
+                        else:
+                            self._log_error(f"Expected user input, but got decision '{decision}'. Aborting.")
+                            if server: self.status_queue.put({"status": "error", "message": f"Operation cancelled during user input. Decision: {decision}"})
+                            return
+                    else: # --force is on or server not running
+                        self._log_error("AI requested user input in non-interactive mode. Aborting.")
+                        return
+
+                # C. Reconcile analysis
                 if not self._reconcile_and_validate_analysis(analysis, all_repo_files):
                     if server:
                         self.status_queue.put({"status": "error", "message": "Failed to reconcile the analysis plan."})
@@ -719,7 +762,7 @@ class CliManager:
                         self.status_queue.put({"status": "finished", "message": "AI analysis resulted in no files to change."})
                     return
 
-                # C. User Confirmation
+                # D. User Confirmation
                 if not self.args.force and server:
                     self._log_info("Analysis complete. Awaiting user confirmation in browser.", icon="✅")
                     
@@ -747,7 +790,7 @@ class CliManager:
                                     self._log_info(f"Model selection overridden by user. 'Use Gemini Flash' is now set to: {analysis.use_flash_model}")
                             
                             # Handle additional context files
-                            additional_files = data.get('additional_context_files', [])
+                            additional_files: List[str] = data.get('additional_context_files', [])
                             if additional_files:
                                 self._log_info(f"User added {len(additional_files)} files to context: {additional_files}")
                                 # Add to relevant_files, avoiding duplicates
