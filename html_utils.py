@@ -1023,14 +1023,12 @@ def create_advice_analysis_html(
 
         <div class="container">
             <h2>High-level Plan for Advice</h2>
-            <ol>
-                {''.join([f'<li>{step}</li>' for step in analysis.plan_for_advice]) if analysis.plan_for_advice else "<li>No plan provided.</li>"}
-            </ol>
+                {''.join([f'{markdown.markdown(step)}' for step in analysis.plan_for_advice]) if analysis.plan_for_advice else "<li>No plan provided.</li>"}
         </div>
 
         <div class="container">
             <h2>Overall Reasoning</h2>
-            <p>{analysis.reasoning or "No reasoning provided."}</p>
+            <p>{markdown.markdown(analysis.reasoning) or "No reasoning provided."}</p>
         </div>
 
         <div class="container">
