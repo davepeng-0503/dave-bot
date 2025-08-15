@@ -1,4 +1,4 @@
-"""# AI Developer Assistant
+# AI Developer Assistant
 
 This repository contains an AI-powered developer assistant tool designed to automate and assist with parts of the software development lifecycle. The tool is built in Python and leverages Google's Gemini models via the `pydantic-ai` library to understand and manipulate code within a git repository.
 
