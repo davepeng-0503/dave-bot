@@ -16,7 +16,6 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
 from google.genai.types import HarmBlockThreshold, HarmCategory, SafetySettingDict
-from pydantic import BaseModel, Field
 from pydantic_ai import Agent
 from pydantic_ai.models.google import GoogleModel, GoogleModelSettings
 from pydantic_ai.providers.google import GoogleProvider
@@ -126,15 +125,7 @@ def write_file_content(directory: str, file_path: str, content: str) -> None:
         logging.error(f"❌ Error writing to file {full_path}: {e}")
 
 
-# --- Agent Tool Models and Functions ---
-
-class GitGrepSearchInput(BaseModel):
-    """Input model for the git grep search tool."""
-    query: str = Field(description="The keyword or regex pattern to search for within the git repository.")
-
-class ReadFileContentInput(BaseModel):
-    """Input model for the read file content tool."""
-    file_path: str = Field(description="The path of the file to read.")
+# --- Agent Tools ---
 
 
 class AgentTools:
