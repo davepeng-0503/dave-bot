@@ -58,7 +58,14 @@ A key feature of the Code agent is an **interactive, browser-based UI** for revi
     ```
 
 3.  **Set up your API Key:**
-    The script will prompt you for your Google API key on first run, or you can set it as an environment variable named `GOOGLE_API_KEY`.
+    To get your Google API Key for Gemini:
+    1.  Go to [Google AI Studio](https://aistudio.google.com/).
+    2.  Log in with your Google account.
+    3.  Click on the **"Get API key"** button (usually found in the top left or top right corner).
+    4.  Click on **"Create API key in new project"** (or select an existing project if you have one).
+    5.  Your API key will be generated. Copy it and keep it safe.
+
+    The script will prompt you for this key on the first run, or you can set it as an environment variable named `GOOGLE_API_KEY` for a more permanent setup.
 
 ---
 
@@ -81,6 +88,21 @@ python code_agent.py --task "Add a new endpoint `/api/v2/users` that returns a l
 *   `--force`: Bypass the interactive web-based approval and automatically accept the AI's first plan.
 *   `--strict` / `--no-strict`: Control whether the AI can make broader improvements or must stick strictly to the task. Defaults to `--strict`.
 *   `--port`: The port for the local web server used for plan approval (defaults to 8080).
+
+---
+## License and Contributions
+
+This project is free to use and fork under the [LICENSE](./LICENSE) terms.
+
+If you fork this project, we require that you provide a link back to the original GitHub repository: [https://github.com/davepeng-0503/dave-bot](https://github.com/davepeng-0503/dave-bot).
+
+Contributions are welcome!
+
+### Donations
+
+If you find this tool useful, please consider supporting its development. Donations are greatly appreciated!
+
+[![Donate](https://img.shields.io/badge/Donate-PayPal-yellow.svg)](https://www.paypal.com/ncp/payment/ELWZ6Q2MZ72CE)
 
 ---
 ## Project Structure
