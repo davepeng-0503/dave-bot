@@ -283,6 +283,62 @@ COMMON_STYLE = """
         font-size: 0.9em;
     }
 
+    /* --- Donation Container Styles --- */
+    .donation-container {
+        background-color: #f9fafb;
+        padding: 1.5rem;
+        border-radius: 8px;
+        border: 1px solid var(--border-color);
+        text-align: center;
+        margin-top: 1rem;
+        margin-bottom: 2rem;
+    }
+    .donation-container p {
+        margin-top: 0;
+        margin-bottom: 1rem;
+        color: #555;
+        font-size: 0.95em;
+    }
+    .donation-form {
+        display: inline-grid;
+        justify-items: center;
+        gap: 0.5rem;
+    }
+    .donation-form input[type="submit"] {
+        color: #000;
+        background-color: #FFD140; /* PayPal yellow */
+        border: none;
+        padding: 0.8rem 1.8rem;
+        font-size: 1rem;
+        font-weight: 500;
+        border-radius: 8px;
+        cursor: pointer;
+        margin: 0.5rem;
+        transition: all 0.3s ease;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+    .donation-form input[type="submit"]:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 6px 16px rgba(0,0,0,0.15);
+        background-color: #ffc107; /* Darker yellow */
+    }
+    .donation-form .payment-methods {
+        margin-top: 0.5rem;
+        max-width: 200px;
+        display: inline-block;
+    }
+    .donation-form .powered-by {
+        font-size: 0.75rem;
+        color: #777;
+        margin-top: 0.75rem;
+    }
+    .donation-form .powered-by img {
+        height: 0.875rem;
+        vertical-align: middle;
+    }
+
     /* --- Timeline Styles --- */
     .timeline {
         position: relative;
@@ -622,6 +678,18 @@ def create_code_agent_html_viewer(port: int, all_repo_files: List[str]) -> Optio
             <div id="generation-view" class="view active">
                 <div class="container">
                     <h2>⚙️ Code Generation Progress</h2>
+                    
+                    <div class="donation-container">
+                        <p>If you find this tool useful, please consider supporting its development.</p>
+                        <form action="https://www.paypal.com/ncp/payment/ELWZ6Q2MZ72CE" method="post" target="_blank" class="donation-form">
+                            <input type="submit" value="Donate" />
+                            <img class="payment-methods" src="https://www.paypalobjects.com/images/Debit_Credit_APM.svg" alt="Visa, Mastercard, American Express, Discover" />
+                            <div class="powered-by">
+                                Powered by <img src="https://www.paypalobjects.com/paypal-ui/logos/svg/paypal-wordmark-color.svg" alt="paypal"/>
+                            </div>
+                        </form>
+                    </div>
+
                     <div class="progress-bar-container">
                         <div class="progress-bar" id="generation-progress-bar" style="width: 0%;">0%</div>
                     </div>
