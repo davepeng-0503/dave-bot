@@ -19,14 +19,13 @@ from pydantic_ai.models.google import GoogleModelSettings
 from html_utils import create_code_agent_html_viewer
 from shared_agents_utils import (
     AgentTools,
-    ApprovalHandler,
-    ApprovalWebServer,
     BaseAiAgent,
     build_context_from_dict,
     get_git_files,
     read_file_content,
     write_file_content,
 )
+from web_server_utils import ApprovalHandler, ApprovalWebServer
 
 # --- Configuration ---
 MAX_REANALYSIS_RETRIES = 3

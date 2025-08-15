@@ -1,24 +1,15 @@
 #!/usr/bin/env python
 """
-Utilities for generating and managing HTML content for user interaction.
+Utilities for generating and managing HTML content for the Code Agent's user interaction.
 
-This module centralizes the creation of HTML pages used by different agents
+This module centralizes the creation of HTML pages used by the code agent
 to display plans, gather feedback, and show results.
 """
 
 import json
 import logging
 import tempfile
-from typing import TYPE_CHECKING, List, Optional
-
-import markdown
-
-# Use TYPE_CHECKING to avoid circular imports at runtime.
-# The agent files will import this module, and this module needs type hints from them.
-if TYPE_CHECKING:
-    from advise_agent import Advice, AdviceAnalysis
-    from code_agent import CodeAnalysis
-
+from typing import List, Optional
 
 # --- Shared HTML Components ---
 
@@ -397,8 +388,6 @@ COMMON_STYLE = """
     }
 </style>
 """
-
-# --- Code Agent HTML Generation ---
 
 
 def create_code_agent_html_viewer(port: int, all_repo_files: List[str]) -> Optional[str]:
@@ -1046,184 +1035,4 @@ def create_code_agent_html_viewer(port: int, all_repo_files: List[str]) -> Optio
         return plan_file_path
     except Exception as e:
         logging.error(f"❌ Could not write the HTML viewer file: {e}")
-        return None
-
-
-# --- Advise Agent HTML Generation ---
-
-
-def create_advice_analysis_html(
-    analysis: "AdviceAnalysis", question: str, port: int
-) -> Optional[str]:
-    """Generates an HTML report for the advice analysis and returns the file path."""
-    if not analysis:
-        return None
-
-    html_content = f"""
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Advice Generation Plan</title>
-    {COMMON_STYLE}
-</head>
-<body>
-    <div id="main-content" class="main-container">
-        <h1>🤖 AI Advice Generation Plan</h1>
-
-        <div class="container">
-            <h2>Your Question</h2>
-            <p>{question}</p>
-        </div>
-
-        <div class="container">
-            <h2>High-level Plan for Advice</h2>
-                {markdown.markdown(' '.join(analysis.plan_for_advice)) if analysis.plan_for_advice else "<li>No plan provided.</li>"}
-        </div>
-
-        <div class="container">
-            <h2>Overall Reasoning</h2>
-            <p>{markdown.markdown(analysis.reasoning) or "No reasoning provided."}</p>
-        </div>
-
-        <div class="container">
-            <h2>Relevant Files for Context</h2>
-            <ul>
-                {''.join([f'<li><code>{file}</code></li>' for file in analysis.relevant_files]) if analysis.relevant_files else "<li>None</li>"}
-            </ul>
-        </div>
-
-        <div class="container actions">
-            <h2>Confirm Plan</h2>
-            <p>Do you want to proceed with generating the advice based on this plan?</p>
-            <button class="approve-btn" onclick="sendDecision('approve')">Approve & Generate Advice</button>
-            <button class="reject-btn" onclick="sendDecision('reject')">Reject</button>
-            <div class="feedback-form">
-                <h3>Refine the Plan</h3>
-                <p>If the plan isn't quite right, provide feedback below and submit it for a new plan.</p>
-                <textarea id="feedback-text" placeholder="e.g., 'Please also consider file X' or 'The plan seems to miss the point about Y'"></textarea>
-                <br>
-                <button class="feedback-btn" onclick="sendFeedback()">Submit Feedback</button>
-            </div>
-        </div>
-    </div>
-
-    <script>
-        const port = {port};
-        const mainContent = document.getElementById('main-content');
-
-        function showMessage(title, message) {{
-            mainContent.innerHTML = `<div class="container"><h1>${{title}}</h1><p>${{message}}</p></div>`;
-        }}
-
-        function sendDecision(decision) {{
-            let fetchOptions = {{ method: 'POST' }};
-            let url = `http://localhost:${{port}}/${{decision}}`;
-
-            fetch(url, fetchOptions)
-                .then(response => response.text())
-                .then(text => {{
-                    const title = 'Decision Received';
-                    const message = text + ' You can close this tab now.';
-                    showMessage(title, message);
-                    setTimeout(() => window.close(), 3000);
-                }})
-                .catch(err => {{
-                    showMessage('Error', `Could not contact server. Please check the console.`);
-                    console.error('Error sending decision:', err);
-                }});
-        }}
-
-        function sendFeedback() {{
-            const feedback = document.getElementById('feedback-text').value;
-            if (!feedback) {{
-                alert('Please enter feedback before submitting.');
-                return;
-            }}
-            fetch(`http://localhost:${{port}}/feedback`, {{
-                method: 'POST',
-                headers: {{ 'Content-Type': 'application/json' }},
-                body: JSON.stringify({{ feedback: feedback }})
-            }})
-            .then(response => response.text())
-            .then(text => {{
-                const title = 'Feedback Submitted';
-                const message = text + ' You can close this tab now.';
-                showMessage(title, message);
-                setTimeout(() => window.close(), 3000);
-            }})
-            .catch(err => {{
-                showMessage('Error', 'Could not contact server. Please check the console.');
-                console.error('Error sending feedback:', err);
-            }});
-        }}
-    </script>
-</body>
-</html>
-    """
-
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", delete=False, suffix=".html", encoding="utf-8"
-        ) as f:
-            plan_file_path = f.name
-            f.write(html_content)
-        logging.info(f"✅ Analysis plan saved to temporary file: {plan_file_path}")
-        return plan_file_path
-    except Exception as e:
-        logging.error(f"❌ Could not write the HTML plan: {e}")
-        return None
-
-
-def create_advice_html(advice: "Advice", question: str) -> Optional[str]:
-    """Generates an HTML report from the advice and returns the file path."""
-
-    response_html = markdown.markdown(advice.response, extensions=["fenced_code", "tables"])
-
-    html_content = f"""
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI-Generated Advice</title>
-    {COMMON_STYLE}
-</head>
-<body>
-    <div class="main-container">
-        <h1>🤖 AI-Generated Advice</h1>
-
-        <div class="container">
-            <h2>Your Question</h2>
-            <p>{question}</p>
-        </div>
-
-        <div class="container">
-            <h2>Advice</h2>
-            {response_html}
-        </div>
-
-        <div class="container">
-            <h2>References</h2>
-            <p>This advice was formulated based on the following files:</p>
-            <ul>
-                {''.join([f'<li><code>{file}</code></li>' for file in advice.references]) if advice.references else "<li>No specific files were referenced.</li>"}
-            </ul>
-        </div>
-    </div>
-</body>
-</html>
-    """
-
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", delete=False, suffix=".html", encoding="utf-8"
-        ) as f:
-            advice_file_path = f.name
-            f.write(advice_file_path)
-        logging.info(f"✅ Advice saved to temporary file: {advice_file_path}")
-        return advice_file_path
-    except Exception as e:
-        logging.error(f"❌ Could not write or open the HTML advice file: {e}")
         return None

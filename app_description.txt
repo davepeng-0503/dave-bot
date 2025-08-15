@@ -1,8 +1,8 @@
-This repository contains a suite of AI-powered developer assistant tools designed to automate parts of the software development lifecycle. The tools are built in Python and leverage Google's Gemini models (specifically Gemini 2.5 Pro and Flash) via the `pydantic-ai` library to understand and manipulate code within a git repository.
+This repository contains an AI-powered developer assistant tool designed to automate parts of the software development lifecycle. The tool is built in Python and leverages Google's Gemini models (specifically Gemini 2.5 Pro and Flash) via the `pydantic-ai` library to understand and manipulate code within a git repository.
 
-The agents are designed to be interactive, often presenting their plans in a web browser for user approval before taking action.
+The agent is designed to be interactive, presenting its plans in a web browser for user approval before taking action.
 
-There are three primary agents:
+The primary agent is:
 
 1.  **Code Agent (`code_agent.py`)**:
     *   **Purpose**: To autonomously perform coding tasks based on a natural language description.
@@ -17,33 +17,8 @@ There are three primary agents:
         *   `GeneratedCode`: Defines the output structure for file generation, including the code itself and context management fields.
     *   **Usage**: Run from the command line with a `--task` argument describing the desired change.
 
-2.  **Code Review Agent (`code_review_agent.py`)**:
-    *   **Purpose**: To perform an automated code review on a set of changes.
-    *   **Workflow**:
-        1.  It identifies changed files in the repository (either local uncommitted changes or changes relative to a specific branch like `main`).
-        2.  It performs an analysis to determine which other files are needed as context to understand the changes. It can use `git grep` to find relevant context.
-        3.  It then reviews each changed file, providing line-specific comments, severity levels, and general feedback.
-        4.  Like the Code Agent, it can request more context if a review is not possible and re-run its analysis to create a better plan. This entire process runs within the command line.
-    *   **Key Pydantic Models**:
-        *   `ReviewAnalysis`: Defines the structure for the initial review plan, identifying files to review and files for context.
-        *   `FileReview`: Defines the output for a single file's review, containing comments, feedback, and context requests.
-    *   **Usage**: Run from the command line with a `--task` argument describing the goal of the changes under review.
-
-3.  **Advise Agent (`advise_agent.py`)**:
-    *   **Purpose**: To answer questions and provide advice about the codebase, acting as a technical advisor.
-    *   **Workflow**:
-        1.  It takes a user's question about the codebase via the `--task` argument.
-        2.  It performs an analysis of the codebase, using `git grep` and file-reading tools, to identify the most relevant files for answering the question and formulates a plan.
-        3.  **It presents its analysis plan (the files it intends to read) in a local web browser for user approval.**
-        4.  Once the plan is approved, it reads the files, summarizes them, and generates a detailed, Markdown-formatted response to the user's question.
-        5.  The final output is presented in an HTML file, including the advice and a list of the source files used.
-    *   **Key Pydantic Models**:
-        *   `AdviceAnalysis`: Defines the structure for the initial plan to find relevant context, including a list of files and potential `git grep` queries.
-        *   `Advice`: Defines the structure for the final output, containing the Markdown response and a list of referenced files.
-    *   **Usage**: Run from the command line with a `--task` argument containing the question you want to ask.
-
 **Shared Components**:
-These files contain common code shared across the agents.
+These files contain common code shared across the agent.
 *   **`shared_agents_utils.py`**:
     *   File system operations (`read_file_content`, `write_file_content`).
     *   Git integration (`get_git_files`, `git_grep_search`).
@@ -51,6 +26,6 @@ These files contain common code shared across the agents.
     *   A context-building function that can summarize files if the total context exceeds a size limit.
     *   **A local web server for handling the interactive user approval workflow.**
 *   **`html_utils.py`**:
-    *   Contains functions to generate the HTML pages used by the Code Agent and Advise Agent to display plans and results to the user in their browser.
+    *   Contains functions to generate the HTML page used by the Code Agent to display plans and results to the user in their browser.
 
-The overall goal of this project is to create intelligent, interactive agents that can reliably and effectively assist human developers with coding, review, and advisory tasks, directly within their local development environment.
+The overall goal of this project is to create an intelligent, interactive agent that can reliably and effectively assist human developers with coding tasks, directly within their local development environment.
