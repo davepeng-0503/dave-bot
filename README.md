@@ -13,6 +13,20 @@ A key feature of the Code agent is an **interactive, browser-based UI** for revi
 *   **Iterative Self-Correction**: The agent can re-analyze its plan if it lacks context, request more information, and retry based on internal checks or user feedback.
 *   **Full Git Integration**: Creates branches, commits, pushes, and can even create a GitHub Pull Request for you.
 
+## License and Contributions
+
+This project is free to use and fork under the [LICENSE](./LICENSE) terms.
+
+If you fork this project, we require that you provide a link back to the original GitHub repository: [https://github.com/davepeng-0503/dave-bot](https://github.com/davepeng-0503/dave-bot).
+
+Contributions are welcome!
+
+### Donations
+
+If you find this tool useful, please consider supporting its development. Donations are greatly appreciated!
+
+[![Donate](https://img.shields.io/badge/Donate-PayPal-yellow.svg)](https://www.paypal.com/ncp/payment/ELWZ6Q2MZ72CE)
+
 ---
 
 ## The Agent
@@ -88,21 +102,6 @@ python code_agent.py --task "Add a new endpoint `/api/v2/users` that returns a l
 *   `--force`: Bypass the interactive web-based approval and automatically accept the AI's first plan.
 *   `--strict` / `--no-strict`: Control whether the AI can make broader improvements or must stick strictly to the task. Defaults to `--strict`.
 *   `--port`: The port for the local web server used for plan approval (defaults to 8080).
-
----
-## License and Contributions
-
-This project is free to use and fork under the [LICENSE](./LICENSE) terms.
-
-If you fork this project, we require that you provide a link back to the original GitHub repository: [https://github.com/davepeng-0503/dave-bot](https://github.com/davepeng-0503/dave-bot).
-
-Contributions are welcome!
-
-### Donations
-
-If you find this tool useful, please consider supporting its development. Donations are greatly appreciated!
-
-[![Donate](https://img.shields.io/badge/Donate-PayPal-yellow.svg)](https://www.paypal.com/ncp/payment/ELWZ6Q2MZ72CE)
 
 ---
 ## Project Structure
