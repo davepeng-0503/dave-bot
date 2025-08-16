@@ -442,6 +442,91 @@ COMMON_STYLE = """
     .autocomplete-items div:hover {
         background-color: #e9e9e9;
     }
+
+    /* --- Generation View File Lists --- */
+    .file-list-container {
+        margin-top: 2rem;
+    }
+    .file-list {
+        list-style-type: none;
+        padding: 0;
+    }
+    .file-item {
+        border: 1px solid var(--border-color);
+        border-radius: 8px;
+        margin-bottom: 0.75rem;
+        background-color: #fff;
+        overflow: hidden; /* To contain the border-radius */
+    }
+    .file-header {
+        padding: 0.8rem 1.2rem;
+        cursor: pointer;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        background-color: #f9fafb;
+        transition: background-color 0.2s ease;
+    }
+    .file-header:hover {
+        background-color: #f1f5f9;
+    }
+    .file-header code {
+        font-size: 1.1em;
+    }
+    .file-header .toggle-arrow {
+        transition: transform 0.3s ease;
+    }
+    .file-item.active .file-header .toggle-arrow {
+        transform: rotate(90deg);
+    }
+    .file-details {
+        display: none;
+        padding: 1rem 1.5rem;
+        border-top: 1px solid var(--border-color);
+        background-color: #ffffff;
+    }
+    .file-item.active .file-details {
+        display: block;
+    }
+    .diff-container {
+        background-color: var(--code-bg-color);
+        color: var(--code-text-color);
+        padding: 1rem;
+        border-radius: 8px;
+        overflow-x: auto;
+        font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+        font-size: 0.9em;
+        white-space: pre;
+    }
+    .diff-line {
+        display: block;
+    }
+    .diff-add {
+        background-color: rgba(46, 160, 67, 0.2);
+    }
+    .diff-remove {
+        background-color: rgba(248, 81, 73, 0.2);
+    }
+    .diff-context {
+        color: #999;
+    }
+    .processing-queue {
+        list-style-type: none;
+        padding: 0;
+    }
+    .processing-queue li {
+        padding: 0.5rem 1rem;
+        background-color: #f9fafb;
+        border: 1px solid var(--border-color);
+        border-radius: 6px;
+        margin-bottom: 0.5rem;
+    }
+    .processing-queue li.processing {
+        font-weight: bold;
+        background-color: var(--primary-color);
+        color: white;
+        border-color: var(--primary-color);
+    }
 </style>
 """
 
@@ -487,49 +572,16 @@ def create_code_agent_html_viewer(port: int, all_repo_files: List[str]) -> Optio
             plan: null,
             status: 'initializing',
             totalFiles: 0,
-            completedFiles: 0,
             timelineItemCounter: 0,
             pollingActive: false,
-            progressAnimationTimer: null,
             additionalContextFiles: [],
+            completedFilesData: {{}},
         }};
 
         // UTILITY FUNCTIONS
         function escapeHtml(unsafe) {{
             if (typeof unsafe !== 'string') return '';
             return unsafe.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
-        }}
-
-        function animateProgressBar(startPercent, endPercent, duration) {{
-            const progressBar = document.getElementById('generation-progress-bar');
-            if (!progressBar) return;
-
-            if (state.progressAnimationTimer) {{
-                cancelAnimationFrame(state.progressAnimationTimer);
-            }}
-
-            let startTime = null;
-
-            function animationStep(timestamp) {{
-                if (!startTime) startTime = timestamp;
-                const elapsed = timestamp - startTime;
-                const progress = Math.min(elapsed / duration, 1);
-                
-                const currentPercent = startPercent + (endPercent - startPercent) * progress;
-                
-                progressBar.style.width = `${{currentPercent}}%`;
-                progressBar.textContent = `${{Math.floor(currentPercent)}}%`;
-
-                if (progress < 1) {{
-                    state.progressAnimationTimer = requestAnimationFrame(animationStep);
-                }} else {{
-                    progressBar.style.width = `${{endPercent}}%`;
-                    progressBar.textContent = `${{Math.floor(endPercent)}}%`;
-                    state.progressAnimationTimer = null;
-                }}
-            }}
-
-            state.progressAnimationTimer = requestAnimationFrame(animationStep);
         }}
 
         // RENDER FUNCTIONS
@@ -670,14 +722,13 @@ def create_code_agent_html_viewer(port: int, all_repo_files: List[str]) -> Optio
         }}
 
         function renderGenerationView() {{
-            state.timelineItemCounter = 0;
-            state.completedFiles = 0;
+            state.completedFilesData = {{}};
             state.totalFiles = state.plan.generation_order.length;
 
             mainContainer.innerHTML = `
             <div id="generation-view" class="view active">
                 <div class="container">
-                    <h2>⚙️ Code Generation Progress</h2>
+                    <h1>⚙️ Code Generation Progress</h1>
                     
                     <div class="donation-container">
                         <p>If you find this tool useful, please consider supporting its development.</p>
@@ -693,13 +744,19 @@ def create_code_agent_html_viewer(port: int, all_repo_files: List[str]) -> Optio
                     <div class="progress-bar-container">
                         <div class="progress-bar" id="generation-progress-bar" style="width: 0%;">0%</div>
                     </div>
-                    <div id="generation-log" class="timeline">
-                         <div class="timeline-item placeholder">
-                            <div class="timeline-content">
-                                <h3>🚀 Process Started</h3>
-                                <p>Waiting for the agent to begin generating files...</p>
-                            </div>
+                    
+                    <div id="completed-files-container" class="file-list-container">
+                        <h2>Completed Files</h2>
+                        <div id="completed-files-list" class="file-list">
+                            <p id="no-completed-files">No files have been generated yet.</p>
                         </div>
+                    </div>
+
+                    <div id="processing-queue-container" class="file-list-container">
+                        <h2>Processing Queue</h2>
+                        <ul id="processing-queue-list" class="processing-queue">
+                            <!-- Queue will be populated by JS -->
+                        </ul>
                     </div>
                 </div>
             </div>
@@ -708,20 +765,10 @@ def create_code_agent_html_viewer(port: int, all_repo_files: List[str]) -> Optio
 
         function addGenericTimelineItem(message, icon, cssClass) {{
             const planningLog = document.getElementById('tool-log');
-            const generationLog = document.getElementById('generation-log');
-            let logContainer = null;
+            if (!planningLog) return;
 
-            // Check which timeline is currently visible in the DOM
-            if (planningLog && planningLog.offsetParent !== null) {{
-                logContainer = planningLog;
-            }} else if (generationLog && generationLog.offsetParent !== null) {{
-                logContainer = generationLog;
-            }}
-
-            if (!logContainer) return;
-
-            if (state.timelineItemCounter === 0 && logContainer.querySelector('.placeholder')) {{
-                logContainer.innerHTML = '';
+            if (state.timelineItemCounter === 0 && planningLog.querySelector('.placeholder')) {{
+                planningLog.innerHTML = '';
             }}
 
             const item = document.createElement('div');
@@ -731,7 +778,7 @@ def create_code_agent_html_viewer(port: int, all_repo_files: List[str]) -> Optio
                     <h3>${{icon || 'ℹ️'}} ${{message}}</h3>
                 </div>
             `;
-            logContainer.appendChild(item);
+            planningLog.appendChild(item);
             state.timelineItemCounter++;
         }}
 
@@ -794,6 +841,34 @@ def create_code_agent_html_viewer(port: int, all_repo_files: List[str]) -> Optio
                     li.innerHTML = `<code>${{escapeHtml(file)}}</code>`;
                     listElement.appendChild(li);
                 }}
+            }}
+        }}
+
+        // --- Generation View Logic ---
+        function renderDiff(diffString) {{
+            if (!diffString || diffString === "No changes detected.") {{
+                return `<div class="diff-container"><span class="diff-context">${{escapeHtml(diffString)}}</span></div>`;
+            }}
+            const lines = diffString.split('\\n');
+            const htmlLines = lines.map(line => {{
+                const escapedLine = escapeHtml(line);
+                if (line.startsWith('+')) {{
+                    return `<span class="diff-line diff-add">${{escapedLine}}</span>`;
+                }} else if (line.startsWith('-')) {{
+                    return `<span class="diff-line diff-remove">${{escapedLine}}</span>`;
+                }} else if (line.startsWith('@@') || line.startsWith('diff') || line.startsWith('index')) {{
+                    return `<span class="diff-line diff-context">${{escapedLine}}</span>`;
+                }}
+                return `<span class="diff-line">${{escapedLine}}</span>`;
+            }}).join('');
+            return `<div class="diff-container">${{htmlLines}}</div>`;
+        }}
+
+        function toggleFileDetails(filePath) {{
+            const elementId = `item-${{filePath.replace(/[^a-zA-Z0-9]/g, '-')}}`;
+            const fileItem = document.getElementById(elementId);
+            if (fileItem) {{
+                fileItem.classList.toggle('active');
             }}
         }}
 
@@ -865,8 +940,11 @@ def create_code_agent_html_viewer(port: int, all_repo_files: List[str]) -> Optio
 
                 case 'writing':
                 case 'done':
-                case 'finished':
                     updateGenerationProgress(data);
+                    break;
+                
+                case 'finished':
+                    handleFinishedStatus();
                     break;
                 
                 case 'error':
@@ -897,102 +975,97 @@ def create_code_agent_html_viewer(port: int, all_repo_files: List[str]) -> Optio
         }}
 
         function updateGenerationProgress(data) {{
-            const logContainer = document.getElementById('generation-log');
-            if (!logContainer) return;
+            const completedList = document.getElementById('completed-files-list');
+            const queueList = document.getElementById('processing-queue-list');
+            if (!completedList || !queueList) return;
 
-            if (state.timelineItemCounter === 0 && logContainer.querySelector('.placeholder')) {{
-                logContainer.innerHTML = '';
+            // Update Progress Bar
+            const completedCount = data.completed_files.length;
+            const percentage = state.totalFiles > 0 ? (completedCount / state.totalFiles) * 100 : 0;
+            const progressBar = document.getElementById('generation-progress-bar');
+            if (progressBar) {{
+                progressBar.style.width = `${{percentage}}%`;
+                progressBar.textContent = `${{Math.round(percentage)}}%`;
             }}
 
-            const FILE_PROCESSING_DURATION = 3 * 60 * 1000; // 3 minutes
+            // Update Completed Files List
+            const noCompletedFilesMsg = document.getElementById('no-completed-files');
+            if (data.completed_files.length > 0 && noCompletedFilesMsg) {{
+                noCompletedFilesMsg.style.display = 'none';
+            }}
 
-            if (data.status === 'writing') {{
-                const elementId = `item-${{data.file_path.replace(/[^a-zA-Z0-9]/g, '-')}}`;
-                
-                const timelineItem = document.createElement('div');
-                timelineItem.id = elementId;
-                timelineItem.className = "timeline-item";
-                timelineItem.innerHTML = `
-                    <div class="timeline-content">
-                        <h3>⏳ Generating File...</h3>
-                        <code>${{escapeHtml(data.file_path)}}</code>
+            if (data.status === 'done') {{
+                state.completedFilesData[data.file_path] = {{
+                    summary: data.summary,
+                    reasoning: data.reasoning,
+                    git_diff: data.git_diff
+                }};
+            }}
+
+            completedList.innerHTML = ''; // Clear and rebuild
+            data.completed_files.forEach(filePath => {{
+                const details = state.completedFilesData[filePath];
+                if (!details) return;
+
+                const elementId = `item-${{filePath.replace(/[^a-zA-Z0-9]/g, '-')}}`;
+                const fileItem = document.createElement('div');
+                fileItem.id = elementId;
+                fileItem.className = 'file-item';
+                fileItem.innerHTML = `
+                    <div class="file-header" onclick="toggleFileDetails('${{filePath}}')">
+                        <code>${{escapeHtml(filePath)}}</code>
+                        <span class="toggle-arrow">▶</span>
+                    </div>
+                    <div class="file-details">
+                        <h4>Summary of Changes</h4>
+                        <div>${{details.summary || 'No summary provided.'}}</div>
+                        <h4>Reasoning for Changes</h4>
+                        <blockquote>${{details.reasoning || 'No reasoning provided.'}}</blockquote>
+                        <h4>Git Diff</h4>
+                        ${{renderDiff(details.git_diff)}}
                     </div>
                 `;
-                logContainer.appendChild(timelineItem);
-                state.timelineItemCounter++;
+                completedList.appendChild(fileItem);
+            }});
 
-                const startPercent = state.totalFiles > 0 ? (state.completedFiles / state.totalFiles) * 100 : 0;
-                const endPercent = state.totalFiles > 0 ? ((state.completedFiles + 1) / state.totalFiles) * 100 : 100;
-                animateProgressBar(startPercent, endPercent, FILE_PROCESSING_DURATION);
-
-            }} else if (data.status === 'done') {{
-                if (state.progressAnimationTimer) {{
-                    cancelAnimationFrame(state.progressAnimationTimer);
-                    state.progressAnimationTimer = null;
+            // Update Processing Queue List
+            queueList.innerHTML = '';
+            data.processing_queue.forEach((filePath, index) => {{
+                const li = document.createElement('li');
+                li.innerHTML = `<code>${{escapeHtml(filePath)}}</code>`;
+                if (index === 0) {{
+                    li.className = 'processing';
+                    li.innerHTML = `⚙️ ${{li.innerHTML}}`;
                 }}
+                queueList.appendChild(li);
+            }});
+        }}
 
-                state.completedFiles++;
-                
-                const percentage = state.totalFiles > 0 ? (state.completedFiles / state.totalFiles) * 100 : 0;
-                const progressBar = document.getElementById('generation-progress-bar');
-                if (progressBar) {{
-                    progressBar.style.width = `${{percentage}}%`;
-                    progressBar.textContent = `${{Math.round(percentage)}}%`;
-                }}
+        function handleFinishedStatus() {{
+            const progressBar = document.getElementById('generation-progress-bar');
+            if (progressBar) {{
+                progressBar.style.width = '100%';
+                progressBar.textContent = '100%';
+            }}
 
-                // 1. Update the original "writing" item to a "complete" state.
-                const elementId = `item-${{data.file_path.replace(/[^a-zA-Z0-9]/g, '-')}}`;
-                const timelineItem = document.getElementById(elementId);
-                
-                if (timelineItem) {{
-                    timelineItem.innerHTML = `
-                        <div class="timeline-content">
-                            <h3>✅ Generation Complete</h3>
-                            <code>${{escapeHtml(data.file_path)}}</code>
+            const queueList = document.getElementById('processing-queue-list');
+            if (queueList) {{
+                queueList.innerHTML = '<li>✅ All files processed.</li>';
+            }}
+
+            const generationView = document.getElementById('generation-view');
+            if (generationView) {{
+                const container = generationView.querySelector('.container');
+                if (container) {{
+                    const finishedItem = document.createElement('div');
+                    finishedItem.innerHTML = `
+                        <div style="background-color: var(--success-color); color: white; padding: 1.5rem; border-radius: 8px; text-align: center; margin-top: 2rem;">
+                            <h2 style="color: white;">🎉 Process Finished!</h2>
+                            <p>All files generated successfully. You can now close this window.</p>
                         </div>
                     `;
+                    container.appendChild(finishedItem);
                 }}
-
-                // 2. Add a new timeline item with the details.
-                const logContainer = document.getElementById('generation-log');
-                if (logContainer) {{
-                    const detailsItem = document.createElement('div');
-                    detailsItem.className = "timeline-item";
-                    // No need for an ID on this one.
-                    detailsItem.innerHTML = `
-                        <div class="timeline-content">
-                            <h3>📝 Summary for <code>${{escapeHtml(data.file_path)}}</code></h3>
-                            <h4>Summary of Changes</h4>
-                            <p>${{data.summary || 'No summary provided.'}}</p>
-                            <h4>Reasoning for Changes</h4>
-                            <blockquote>${{data.reasoning || 'No reasoning provided.'}}</blockquote>
-                        </div>
-                    `;
-                    logContainer.appendChild(detailsItem);
-                    state.timelineItemCounter++;
-                }}
-
-            }} else if (data.status === 'finished') {{
-                if (state.progressAnimationTimer) {{
-                    cancelAnimationFrame(state.progressAnimationTimer);
-                    state.progressAnimationTimer = null;
-                }}
-
-                const progressBar = document.getElementById('generation-progress-bar');
-                if (progressBar) {{
-                    progressBar.style.width = '100%';
-                    progressBar.textContent = '100%';
-                }}
-
-                const finishedItem = document.createElement('div');
-                finishedItem.className = "timeline-item";
-                finishedItem.innerHTML = `
-                    <div class="timeline-content" style="background-color: var(--success-color); color: white;">
-                        <h3>🎉 Process Finished!</h3>
-                        <p>All files generated successfully. You can now close this window.</p>
-                    </div>
-                `;
-                logContainer.appendChild(finishedItem);
             }}
         }}
 

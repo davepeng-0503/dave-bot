@@ -21,6 +21,7 @@ from shared_agents_utils import (
     AgentTools,
     BaseAiAgent,
     build_context_from_dict,
+    get_git_diff,
     get_git_files,
     read_file_content,
     write_file_content,
@@ -508,7 +509,12 @@ class CliManager:
                 file_path = files_to_process[i]
                 i += 1 # Increment early, so we can `continue` or `break`
 
-                self.status_queue.put({"status": "writing", "file_path": file_path})
+                self.status_queue.put({
+                    "status": "writing",
+                    "file_path": file_path,
+                    "completed_files": edited_files,
+                    "processing_queue": files_to_process[i-1:],
+                })
 
                 remaining_order = files_to_process[i:]
                 context_str = build_context_from_dict(context_data, self.ai_agent.summarize_code, exclude_file=file_path)
@@ -527,12 +533,19 @@ class CliManager:
                     break  # Break inner loop to re-run analysis
 
                 # Success case
+                git_diff = get_git_diff(self.args.dir, file_path, generated_code.code)
                 write_file_content(self.args.dir, file_path, generated_code.code)
+
+                completed_files_so_far = edited_files + [file_path]
+
                 self.status_queue.put({
                     "status": "done",
                     "file_path": file_path,
                     "summary": markdown.markdown(generated_code.summary),
                     "reasoning": markdown.markdown(generated_code.reasoning),
+                    "git_diff": git_diff,
+                    "completed_files": completed_files_so_far,
+                    "processing_queue": files_to_process[i:],
                 })
 
                 context_data[file_path] = generated_code.code  # Update context for next file in this loop

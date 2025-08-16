@@ -77,3 +77,6 @@ class GeneratedCode(BaseModel):
         description="A list of file paths (new or existing) that you believe need to be generated or regenerated to complete the task. You can use this to add files that were missed in the initial plan, or to revisit a file you have already generated if you realize a change is needed."
     )
 
+class GeneratedCodeWithDiff(GeneratedCode):
+    """Represents a generated code file along with its git diff."""
+    git_diff: str = Field(description="The git diff of the changes for the file.")
