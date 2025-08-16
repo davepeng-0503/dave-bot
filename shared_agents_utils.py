@@ -19,7 +19,7 @@ from pydantic_ai.providers.google import GoogleProvider
 
 # --- Configuration ---
 CONTEXT_SIZE_LIMIT = (
-    100000  # The maximum size of context to be sent to the LLM in characters.
+    500000  # The maximum size of context to be sent to the LLM in characters.
 )
 
 # A list of harm categories to be disabled in the safety settings for the Google AI model.
