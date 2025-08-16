@@ -77,7 +77,7 @@ You are an expert software developer planning a coding task. Your goal is to cre
 **CRITICAL**:
 - **`branch_name`**: Must be a valid git branch name.
 - **`plan`**: This should be a detailed, step-by-step description of the changes you will make.
-- **`generation_order`**: This is the most important part of your execution plan. It must list all files from `files_to_edit` and `files_to_create` in the correct dependency order.
+- **`file_dependencies`**: This is the most important part of your execution plan. It must be a dependency graph for all files from `files_to_edit` and `files_to_create`. Each key is a file, and its value is a list of files it depends on from within the set of files to be generated. Files with no dependencies can be generated in parallel. For example, if 'b.py' imports from 'a.py', the dependency would be `{{"b.py": ["a.py"], "a.py": []}}`.
 - **Model Selection**: If the task is very simple (e.g., fixing a typo, updating a version number, a simple one-line change), set `use_flash_model` to `true`. This uses a faster model for code generation. For anything more complex, leave it `false` to use the more powerful model.
 - **Asking Questions**: Use `user_request` for questions about the *task requirements*. Use `additional_grep_queries_needed` for questions about the *existing code*. Only fill out ONE of `user_request`, `additional_grep_queries_needed`, or the full plan.
 
@@ -289,49 +289,78 @@ class CliManager:
 
     def _reconcile_and_validate_analysis(self, analysis: CodeAnalysis, all_repo_files: List[str]) -> bool:
         """
-        Validates and reconciles the AI's plan. It treats `generation_order` as the source of truth
-        and adjusts `files_to_edit` and `files_to_create` to match it, ensuring consistency.
+        Validates the AI's dependency graph and reconciles file lists.
+        It ensures the graph is acyclic and that `files_to_edit` and `files_to_create` match the graph.
         """
         if not analysis:
             self._log_error("Cannot validate a null analysis.")
             return False
 
+        if not analysis.file_dependencies:
+            if analysis.files_to_edit or analysis.files_to_create:
+                self._log_error("Analysis provided files to modify but no dependency graph (`file_dependencies`).")
+                return False
+            return True # No files to change, valid plan.
+
+        # 1. Check for circular dependencies using topological sort
+        graph = analysis.file_dependencies
+        for u, deps in graph.items():
+            for v in deps:
+                if v not in graph:
+                    self._log_error(f"Invalid dependency graph: File '{u}' depends on '{v}', but '{v}' is not in the set of files to be generated.")
+                    return False
+
+        in_degree = {u: 0 for u in graph}
+        reverse_adj = {u: [] for u in graph}
+        for u, deps in graph.items():
+            for v in deps:
+                in_degree[u] += 1
+                reverse_adj[v].append(u)
+
+        queue = [u for u in graph if in_degree[u] == 0]
+        count = 0
+        while queue:
+            u = queue.pop(0)
+            count += 1
+            for v in reverse_adj[u]:
+                in_degree[v] -= 1
+                if in_degree[v] == 0:
+                    queue.append(v)
+
+        if count != len(graph):
+            self._log_error("Circular dependency detected in the file generation plan. Cannot proceed.")
+            return False
+        self._log_info("File dependency graph is valid (no circular dependencies).", icon="✅")
+
+        # 2. Reconcile file lists with the dependency graph keys
+        dep_graph_files = set(analysis.file_dependencies.keys())
         planned_files: Set[str] = set(analysis.files_to_edit) | {f.file_path for f in analysis.files_to_create}
-        ordered_files: Set[str] = set(analysis.generation_order)
 
-        if planned_files == ordered_files:
-            return True  # No mismatch, nothing to do.
+        if planned_files == dep_graph_files:
+            return True
 
-        self._log_warning("Mismatch found between planned files and generation order. Reconciling lists using 'generation_order' as the source of truth.")
+        self._log_warning("Mismatch found between planned files and dependency graph. Reconciling lists using 'file_dependencies' as the source of truth.")
 
         new_files_to_edit: List[str] = []
         new_files_to_create: List[NewFile] = []
-        
-        # Keep existing NewFile objects if they are in the generation order
         existing_creations = {f.file_path: f for f in analysis.files_to_create}
 
-        for file_path in analysis.generation_order:
-            # We need to check if the file exists in the repo to decide if it's an edit or create.
-            # The `all_repo_files` list includes all tracked and untracked files.
+        for file_path in dep_graph_files:
             if file_path in all_repo_files:
                 if file_path not in new_files_to_edit:
                     new_files_to_edit.append(file_path)
             else:
-                # It's a file to be created.
                 if file_path in existing_creations:
-                    # Preserve the detailed NewFile object if it exists
                     new_files_to_create.append(existing_creations[file_path])
                 else:
-                    # Create a placeholder NewFile object
-                    self._log_warning(f"File '{file_path}' from generation_order was not in files_to_create. Adding it.")
+                    self._log_warning(f"File '{file_path}' from dependency graph was not in files_to_create. Adding it.")
                     new_files_to_create.append(NewFile(
                         file_path=file_path,
-                        reasoning="File was added to the plan to match the generation order."
+                        reasoning="File was added to the plan to match the dependency graph."
                     ))
-        
-        # Log what was removed from the original plan
-        for file_path in planned_files - ordered_files:
-            self._log_warning(f"File '{file_path}' was in the original plan but not in generation_order. Removing it.")
+
+        for file_path in planned_files - dep_graph_files:
+            self._log_warning(f"File '{file_path}' was in the original plan but not in the dependency graph. Removing it.")
 
         analysis.files_to_edit = sorted(new_files_to_edit)
         analysis.files_to_create = sorted(new_files_to_create, key=lambda f: f.file_path)
@@ -472,71 +501,148 @@ class CliManager:
             self._log_error(f"Failed to create pull request: {e.stderr}")
             return False
 
+    def _generation_worker(
+        self,
+        task: str,
+        context_data: Dict[str, str],
+        file_path: str,
+        all_repo_files: List[str],
+        generation_queue: List[str],
+        edited_files: List[str],
+        strict: bool,
+        use_flash_model: bool,
+        results_queue: queue.Queue,
+    ):
+        """A thread worker function to generate code for a single file."""
+        try:
+            original_content = context_data.get(file_path)
+            context_str = build_context_from_dict(
+                context_data, self.ai_agent.summarize_code, exclude_file=file_path
+            )
+            
+            generated_code = self.ai_agent.generate_file_content(
+                task,
+                context_str,
+                file_path,
+                all_repo_files,
+                generation_queue,
+                edited_files,
+                original_content,
+                strict=strict,
+                use_flash_model=use_flash_model,
+            )
+            results_queue.put({"file_path": file_path, "generated_code": generated_code, "error": None})
+        except Exception as e:
+            logging.error(f"Error in generation worker for {file_path}: {e}", exc_info=True)
+            results_queue.put({"file_path": file_path, "generated_code": None, "error": e})
+
     def _execute_generation_loop(self, analysis: CodeAnalysis, all_repo_files: List[str], app_desc_content: str) -> List[str]:
         """
-        Manages the iterative process of generating code, handling context, and re-analyzing on failure.
+        Manages the iterative process of generating code in parallel based on a dependency graph.
         Returns a list of files that were not successfully processed.
         """
-        files_to_process = list(analysis.generation_order)
+        dependencies = analysis.file_dependencies.copy()
+        all_files_to_generate = set(dependencies.keys())
+        completed_files: Set[str] = set()
         context_data: Dict[str, str] = {}
         feedback_for_reanalysis = ""
         retries = 0
-        edited_files: List[str] = []
 
-        while files_to_process and retries <= MAX_REANALYSIS_RETRIES:
+        # Pre-load context for all relevant and to-be-generated files
+        files_for_context = list(set(analysis.relevant_files) | all_files_to_generate)
+        for fp in files_for_context:
+            if fp not in context_data:
+                content = read_file_content(self.args.dir, fp)
+                if content is not None:
+                    context_data[fp] = content
+
+        while len(completed_files) < len(all_files_to_generate) and retries <= MAX_REANALYSIS_RETRIES:
             if feedback_for_reanalysis:
                 self._log_info("--- Re-running Analysis with Feedback ---", icon="🔁")
-                analysis = self.ai_agent.get_initial_analysis(
+                new_analysis = self.ai_agent.get_initial_analysis(
                     self.args.task, all_repo_files, app_desc_content, feedback=feedback_for_reanalysis, previous_plan=analysis, git_grep_search_tool=self.agent_tools.git_grep_search, read_file_tool=self.agent_tools.read_file
                 )
-                files_to_process = list(analysis.generation_order)
-                feedback_for_reanalysis = ""  # Reset feedback
+                if not self._reconcile_and_validate_analysis(new_analysis, all_repo_files):
+                    self._log_error("Re-analysis resulted in an invalid plan. Aborting generation.")
+                    return list(all_files_to_generate - completed_files)
+                
+                analysis = new_analysis
+                dependencies = analysis.file_dependencies.copy()
+                all_files_to_generate = set(dependencies.keys())
+                feedback_for_reanalysis = ""
 
-            # Pre-load context for the current batch of files
-            files_for_context = list(set(analysis.relevant_files + analysis.files_to_edit))
-            for fp in files_for_context:
-                if fp not in context_data:  # Only load if not already in memory
-                    content = read_file_content(self.args.dir, fp)
-                    if content is not None:
-                        context_data[fp] = content
+            # Find files ready to be processed (no outstanding dependencies)
+            ready_to_process = sorted([
+                f for f in all_files_to_generate
+                if f not in completed_files and all(dep in completed_files for dep in dependencies.get(f, []))
+            ])
+
+            if not ready_to_process:
+                self._log_error("Circular dependency or stalled generation detected. Cannot proceed.")
+                self._log_error(f"Completed files: {completed_files}")
+                self._log_error(f"Remaining files: {all_files_to_generate - completed_files}")
+                return list(all_files_to_generate - completed_files)
+
+            self._log_info(f"Starting parallel generation for {len(ready_to_process)} files: {ready_to_process}", icon="⚡")
             
-            processed_in_loop: List[str] = []
-            reanalysis_needed = False
+            threads = []
+            results_queue = queue.Queue()
+            batch_context_data = context_data.copy()
 
-            # Use an index-based loop to allow modification of files_to_process during iteration
-            i = 0
-            while i < len(files_to_process):
-                file_path = files_to_process[i]
-                i += 1 # Increment early, so we can `continue` or `break`
-
+            for file_path in ready_to_process:
                 self.status_queue.put({
                     "status": "writing",
                     "file_path": file_path,
-                    "completed_files": edited_files,
-                    "processing_queue": files_to_process[i-1:],
+                    "completed_files": list(completed_files),
+                    "processing_queue": sorted(list(all_files_to_generate - completed_files)),
                 })
-
-                remaining_order = files_to_process[i:]
-                context_str = build_context_from_dict(context_data, self.ai_agent.summarize_code, exclude_file=file_path)
                 
-                generated_code = self.ai_agent.generate_file_content(
-                    self.args.task, context_str, file_path, all_repo_files,
-                    remaining_order, edited_files, context_data.get(file_path), strict=self.args.strict,
-                    use_flash_model=analysis.use_flash_model
-                )
+                remaining_files_for_prompt = sorted(list(all_files_to_generate - completed_files - set(ready_to_process)))
 
-                if generated_code.requires_more_context:
-                    self._log_warning(f"Generator needs more context for {file_path}: {generated_code.context_request}")
-                    feedback_for_reanalysis = generated_code.context_request
+                thread = threading.Thread(
+                    target=self._generation_worker,
+                    args=(
+                        self.args.task, batch_context_data, file_path, all_repo_files,
+                        remaining_files_for_prompt, list(completed_files), self.args.strict,
+                        analysis.use_flash_model, results_queue,
+                    ),
+                )
+                threads.append(thread)
+                thread.start()
+
+            for t in threads:
+                t.join()
+
+            batch_results = []
+            while not results_queue.empty():
+                batch_results.append(results_queue.get())
+            
+            reanalysis_needed = False
+            for result in batch_results:
+                generated_code = result.get("generated_code")
+                if result.get("error") or (generated_code and generated_code.requires_more_context):
+                    error_msg = generated_code.context_request if generated_code else str(result.get("error"))
+                    self._log_warning(f"Generator needs more context for {result['file_path']}: {error_msg}")
+                    feedback_for_reanalysis = error_msg
                     retries += 1
                     reanalysis_needed = True
-                    break  # Break inner loop to re-run analysis
+                    break
+            
+            if reanalysis_needed:
+                continue
 
-                # Success case
+            # Process successful generations, sorted for deterministic order
+            batch_results.sort(key=lambda r: r['file_path'])
+            
+            for result in batch_results:
+                file_path = result["file_path"]
+                generated_code = result["generated_code"]
+                
                 git_diff = get_git_diff(self.args.dir, file_path, generated_code.code)
                 write_file_content(self.args.dir, file_path, generated_code.code)
 
-                completed_files_so_far = edited_files + [file_path]
+                completed_files.add(file_path)
+                context_data[file_path] = generated_code.code
 
                 self.status_queue.put({
                     "status": "done",
@@ -544,54 +650,32 @@ class CliManager:
                     "summary": markdown.markdown(generated_code.summary),
                     "reasoning": markdown.markdown(generated_code.reasoning),
                     "git_diff": git_diff,
-                    "completed_files": completed_files_so_far,
-                    "processing_queue": files_to_process[i:],
+                    "completed_files": list(completed_files),
+                    "processing_queue": sorted(list(all_files_to_generate - completed_files)),
                 })
 
-                context_data[file_path] = generated_code.code  # Update context for next file in this loop
-                processed_in_loop.append(file_path)
-                if file_path not in edited_files:
-                    edited_files.append(file_path)
-
-                # Dynamically load more context if requested for future files
                 if generated_code.needed_context_for_future_files:
                     self._log_info(f"Agent requested more context for future steps: {generated_code.needed_context_for_future_files}")
                     for new_context_file in generated_code.needed_context_for_future_files:
                         if new_context_file not in context_data:
                             content = read_file_content(self.args.dir, new_context_file)
-                            if content:
-                                context_data[new_context_file] = content
+                            if content: context_data[new_context_file] = content
                 
-                # Dynamically add files to the generation queue
                 if generated_code.add_to_generation_queue:
-                    files_to_add = generated_code.add_to_generation_queue
-                    files_to_add = [f for f in files_to_add if f not in files_to_process]
-                    self._log_info(f"Agent requested to add {len(files_to_add)} file(s) to the generation queue: {files_to_add}")
-                    
-                    # Add new files to the end of the processing list and master plan
-                    files_to_process.extend(files_to_add)
-                    analysis.generation_order.extend(files_to_add)
-                    
-                    self.status_queue.put({
-                        "status": "plan_updated",
-                        "files_added": files_to_add,
-                        "new_total_files": len(analysis.generation_order)
-                    })
+                    files_to_add = [f for f in generated_code.add_to_generation_queue if f not in all_files_to_generate]
+                    if files_to_add:
+                        self._log_info(f"Agent requested to add {len(files_to_add)} file(s) to the generation queue: {files_to_add}")
+                        for f in files_to_add:
+                            all_files_to_generate.add(f)
+                            dependencies[f] = [] # Assume new files have no dependencies on other generated files
+                        
+                        self.status_queue.put({
+                            "status": "plan_updated",
+                            "files_added": files_to_add,
+                            "new_total_files": len(all_files_to_generate)
+                        })
 
-            # Update the list of files to process for the next iteration
-            # This logic is now tricky because we used an index-based loop.
-            # If reanalysis was needed, we need to figure out the remaining files.
-            if reanalysis_needed:
-                # The files from `i` onwards are the ones not yet processed in this attempt.
-                files_to_process = files_to_process[i-1:]
-            else:
-                # The loop completed successfully
-                files_to_process = []
-
-            if not reanalysis_needed:
-                break  # Exit while loop if all files processed successfully
-
-        return files_to_process
+        return list(all_files_to_generate - completed_files)
 
     def _report_final_status(self, unprocessed_files: List[str]):
         """Prints the final status of the code generation task."""
@@ -736,7 +820,7 @@ class CliManager:
                     self._log_error("Failed to reconcile the analysis plan. Aborting.")
                     return
                 
-                if not analysis.generation_order:
+                if not analysis.file_dependencies:
                     self._log_info("AI analysis resulted in no files to change. Exiting.")
                     if server:
                         self.status_queue.put({"status": "finished", "message": "AI analysis resulted in no files to change."})
