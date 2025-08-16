@@ -136,7 +136,7 @@ Please provide your analysis. Use the `git_grep_search_tool` and `read_file_tool
             tools.append(read_file_tool)
 
         analysis_agent = Agent(
-            self._get_gemini_model("gemini-1.5-pro-latest"),
+            self._get_gemini_model("gemini-2.5-flash"),
             output_type=CodeAnalysis,
             system_prompt=system_prompt,
             tools=tools,
@@ -218,7 +218,7 @@ Original content of `{file_path}`:
 """
         prompt += "\nPlease generate the complete, new source code for this file, along with a summary and reasoning. If you lack context for this file or foresee needing context for future files, please request it."
 
-        model_name = "gemini-1.5-flash-latest" if use_flash_model else "gemini-1.5-pro-latest"
+        model_name = "gemini-2.5-flash" if use_flash_model else "gemini-2.5-pro"
 
         generation_agent = Agent(
             self._get_gemini_model(model_name),
