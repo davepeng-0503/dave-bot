@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Dict
 from pydantic import BaseModel, Field
 # --- Pydantic Models for Code Analysis & Generation ---
 
@@ -32,13 +32,13 @@ class CodeAnalysis(BaseModel):
         default=[],
         description="A list of new files that should be created to complete the task."
     )
-    generation_order: List[str] = Field(
-        default=[],
-        description="The recommended order to process files (both creating and editing) to satisfy dependencies. For example, create a utility file before editing a file that uses it."
+    file_dependencies: Dict[str, List[str]] = Field(
+        default={},
+        description="A dependency graph representing the order of file generation. Each key is a file path (from files_to_edit or files_to_create), and its value is a list of file paths it depends on from within the set of files to be generated. Files with no dependencies can be generated in parallel. For example, if 'b.py' imports from 'a.py', the dependency would be {'b.py': ['a.py'], 'a.py': []}."
     )
     reasoning: str = Field(
         default="",
-        description="A brief, high-level explanation of the overall strategy, why these files were chosen, and why the generation order is correct."
+        description="A brief, high-level explanation of the overall strategy, why these files were chosen, and why the dependency graph is correct."
     )
     additional_grep_queries_needed: List[str] = Field(
         default=[],
