@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+"""#!/usr/bin/env python
 import argparse
 import json
 import logging
@@ -184,7 +184,7 @@ you will generate the full, production-ready code for the specified file path.
 **IMPORTANT RULES**:
 1.  Your output must be the complete, raw code for the file. Do not include markdown backticks (```python ... ```) or any other explanations in the `code` field.
 2.  The code should be well-structured, follow best practices, and be ready for integration.
-3.  If you are unsure of how to implement something. Do not fill out the code, summary or reasoning fields. Instead, set `requires_more_context` to `true` and provide a clear `user_request` explaining what additional information you need.
+3.  If you are unsure of how to implement something. Do not fill out the code, summary or reasoning fields. Instead, set `requires_more_context` to `true` and provide a clear `user_request` explaining what information you need.
 4.  If you believe after generating this file that another file not included must be edited or a file needs to be revisited, you may request to add it to the generation queue by populating the `add_to_generation_queue` field with a list of file paths.
 5.  You must also provide a concise `summary` of the changes and a `reasoning` for why these changes were made.
 6.  {"You must only make code changes directly related to completion of the task, refactors and cleaning up should not be prioritised unless specifically part of the task given" if strict else "You may make other changes as you see fit to improve code maintainability and clarity."}
@@ -826,7 +826,8 @@ class CliManager:
             server_thread.daemon = True
             server_thread.start()
             self._log_info(f"Interactive viewer is running. Opening in your browser...", icon="🌐")
-            webbrowser.open(f"file://{os.path.realpath(viewer_html_path)}")
+            # FIX: Open the web server URL, not the local file path
+            webbrowser.open(f"http://localhost:{self.args.port}")
         else:
             self._log_info("Running in non-interactive mode due to --force flag.")
 
