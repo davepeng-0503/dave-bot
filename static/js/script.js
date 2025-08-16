@@ -87,7 +87,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // --- UI RENDERING ---
     const showView = (viewName) => {
-        Object.values(views).forEach(view => view.classList.add('hidden'));
+        Object.values(views).forEach(view => {
+            if (view) view.classList.add('hidden');
+        });
         if (views[viewName]) {
             views[viewName].classList.remove('hidden');
         }
@@ -106,6 +108,7 @@ document.addEventListener('DOMContentLoaded', () => {
     };
     
     const renderList = (listElement, items) => {
+        if (!listElement) return;
         listElement.innerHTML = '';
         if (items && items.length > 0) {
             items.forEach(item => {
@@ -123,15 +126,19 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const renderPlanning = (data) => {
         showView('planning');
-        elements.planningProgress.style.width = `${data.progress || 0}%`;
-        elements.timeline.innerHTML = '';
-        if (data.tool_logs) {
-            data.tool_logs.forEach(log => {
-                const item = document.createElement('div');
-                item.className = 'timeline-item';
-                item.innerHTML = `<strong>${log.tool_name}</strong><pre><code>${JSON.stringify(log.tool_input, null, 2)}</code></pre>`;
-                elements.timeline.appendChild(item);
-            });
+        if (elements.planningProgress) {
+            elements.planningProgress.style.width = `${data.progress || 0}%`;
+        }
+        if (elements.timeline) {
+            elements.timeline.innerHTML = '';
+            if (data.tool_logs) {
+                data.tool_logs.forEach(log => {
+                    const item = document.createElement('div');
+                    item.className = 'timeline-item';
+                    item.innerHTML = `<strong>${log.tool_name}</strong><pre><code>${JSON.stringify(log.tool_input, null, 2)}</code></pre>`;
+                    elements.timeline.appendChild(item);
+                });
+            }
         }
     };
 
@@ -140,12 +147,14 @@ document.addEventListener('DOMContentLoaded', () => {
             showView('planReview');
             allFiles = data.all_files || [];
             
-            elements.planAndReasoning.innerHTML = `
-                <h3>Plan</h3>
-                <p>${data.plan.replace(/\n/g, '<br>')}</p>
-                <h3>Reasoning</h3>
-                <p>${data.reasoning.replace(/\n/g, '<br>')}</p>
-            `;
+            if (elements.planAndReasoning) {
+                elements.planAndReasoning.innerHTML = `
+                    <h3>Plan</h3>
+                    <p>${data.plan.replace(/\n/g, '<br>')}</p>
+                    <h3>Reasoning</h3>
+                    <p>${data.reasoning.replace(/\n/g, '<br>')}</p>
+                `;
+            }
             renderList(elements.relevantFilesList, data.relevant_files);
             renderList(elements.filesToEditList, data.files_to_edit);
             renderList(elements.generationOrderList, data.generation_order);
@@ -154,7 +163,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const renderUserInput = (data) => {
         showView('userInput');
-        elements.userInputPrompt.textContent = data.user_request;
+        if (elements.userInputPrompt) {
+            elements.userInputPrompt.textContent = data.user_request;
+        }
     };
 
     const renderGenerating = (data) => {
@@ -163,52 +174,61 @@ document.addEventListener('DOMContentLoaded', () => {
         const completed = data.completed_files.length;
         const progress = total > 0 ? (completed / total) * 100 : 0;
 
-        elements.generationProgress.style.width = `${progress}%`;
-        elements.completedFilesCount.textContent = completed;
-        elements.totalFilesCount.textContent = total;
+        if (elements.generationProgress) {
+            elements.generationProgress.style.width = `${progress}%`;
+        }
+        if (elements.completedFilesCount) {
+            elements.completedFilesCount.textContent = completed;
+        }
+        if (elements.totalFilesCount) {
+            elements.totalFilesCount.textContent = total;
+        }
 
-        // Only update completed files if the list has changed
-        const existingFiles = new Set([...elements.completedFilesContainer.querySelectorAll('details')].map(d => d.dataset.filePath));
-        const newFiles = data.completed_files.filter(f => !existingFiles.has(f.file_path));
+        if (elements.completedFilesContainer) {
+            const existingFiles = new Set([...elements.completedFilesContainer.querySelectorAll('details')].map(d => d.dataset.filePath));
+            const newFiles = data.completed_files.filter(f => !existingFiles.has(f.file_path));
 
-        newFiles.forEach(file => {
-            const details = document.createElement('details');
-            details.className = 'generated-file-details';
-            details.dataset.filePath = file.file_path;
+            newFiles.forEach(file => {
+                const details = document.createElement('details');
+                details.className = 'generated-file-details';
+                details.dataset.filePath = file.file_path;
 
-            const summary = document.createElement('summary');
-            summary.textContent = file.file_path;
-            
-            const content = document.createElement('div');
-            content.className = 'generated-file-content';
-            content.innerHTML = `
-                <div class="card">
-                    <h4>Summary</h4>
-                    <p>${file.summary.replace(/\n/g, '<br>')}</p>
-                </div>
-                <div class="card">
-                    <h4>Reasoning</h4>
-                    <p>${file.reasoning.replace(/\n/g, '<br>')}</p>
-                </div>
-                <div class="card">
-                    <h4>Diff</h4>
-                    <div class="diff-container">
-                        <pre><code>${renderDiff(file.diff)}</code></pre>
+                const summary = document.createElement('summary');
+                summary.textContent = file.file_path;
+                
+                const content = document.createElement('div');
+                content.className = 'generated-file-content';
+                content.innerHTML = `
+                    <div class="card">
+                        <h4>Summary</h4>
+                        <p>${file.summary.replace(/\n/g, '<br>')}</p>
                     </div>
-                </div>
-            `;
-            details.appendChild(summary);
-            details.appendChild(content);
-            elements.completedFilesContainer.appendChild(details);
-        });
+                    <div class="card">
+                        <h4>Reasoning</h4>
+                        <p>${file.reasoning.replace(/\n/g, '<br>')}</p>
+                    </div>
+                    <div class="card">
+                        <h4>Diff</h4>
+                        <div class="diff-container">
+                            <pre><code>${renderDiff(file.diff)}</code></pre>
+                        </div>
+                    </div>
+                `;
+                details.appendChild(summary);
+                details.appendChild(content);
+                elements.completedFilesContainer.appendChild(details);
+            });
+        }
 
         renderList(elements.pendingFilesList, data.pending_files);
     };
 
     const renderDone = (data) => {
         showView('done');
-        elements.doneMessage.textContent = data.message || 'Task completed successfully.';
-        if (data.commit_message) {
+        if (elements.doneMessage) {
+            elements.doneMessage.textContent = data.message || 'Task completed successfully.';
+        }
+        if (data.commit_message && elements.commitMessage) {
             elements.commitMessage.innerHTML = `<strong>Commit Message:</strong><pre>${data.commit_message}</pre>`;
         }
         if (pollingInterval) clearInterval(pollingInterval);
@@ -216,7 +236,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const renderError = (data) => {
         showView('error');
-        elements.errorMessage.textContent = data.error || 'An unknown error occurred.';
+        if (elements.errorMessage) {
+            elements.errorMessage.textContent = data.error || 'An unknown error occurred.';
+        }
         if (pollingInterval) clearInterval(pollingInterval);
     };
 
@@ -247,30 +269,44 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     // --- EVENT LISTENERS ---
-    elements.approveBtn.addEventListener('click', () => {
-        const contextFiles = [...elements.userContextFilesList.querySelectorAll('li')].map(li => li.textContent);
-        sendAction('/approve', { context_files: contextFiles });
-    });
+    if (elements.approveBtn) {
+        elements.approveBtn.addEventListener('click', () => {
+            const contextFiles = elements.userContextFilesList 
+                ? [...elements.userContextFilesList.querySelectorAll('li')].map(li => li.firstChild.textContent.trim())
+                : [];
+            sendAction('/approve', { context_files: contextFiles });
+        });
+    }
 
-    elements.rejectBtn.addEventListener('click', () => {
-        sendAction('/reject');
-    });
+    if (elements.rejectBtn) {
+        elements.rejectBtn.addEventListener('click', () => {
+            sendAction('/reject');
+        });
+    }
 
-    elements.sendFeedbackBtn.addEventListener('click', () => {
-        const feedback = elements.feedbackInput.value;
-        if (feedback) {
-            sendAction('/feedback', { feedback });
-            elements.feedbackInput.value = '';
-        }
-    });
+    if (elements.sendFeedbackBtn) {
+        elements.sendFeedbackBtn.addEventListener('click', () => {
+            if (elements.feedbackInput) {
+                const feedback = elements.feedbackInput.value;
+                if (feedback) {
+                    sendAction('/feedback', { feedback });
+                    elements.feedbackInput.value = '';
+                }
+            }
+        });
+    }
     
-    elements.sendUserInputBtn.addEventListener('click', () => {
-        const userInput = elements.userInputArea.value;
-        if (userInput) {
-            sendAction('/user_input', { user_input: userInput });
-            elements.userInputArea.value = '';
-        }
-    });
+    if (elements.sendUserInputBtn) {
+        elements.sendUserInputBtn.addEventListener('click', () => {
+            if (elements.userInputArea) {
+                const userInput = elements.userInputArea.value;
+                if (userInput) {
+                    sendAction('/user_input', { user_input: userInput });
+                    elements.userInputArea.value = '';
+                }
+            }
+        });
+    }
 
     // Autocomplete Logic
     const filterFiles = (input) => {
@@ -279,6 +315,8 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     const showAutocomplete = (matches) => {
+        if (!elements.autocompleteList || !elements.contextFileInput) return;
+
         elements.autocompleteList.innerHTML = '';
         if (matches.length > 0) {
             matches.slice(0, 10).forEach(match => { // Show max 10 matches
@@ -297,30 +335,44 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
 
-    elements.contextFileInput.addEventListener('input', (e) => {
-        const matches = filterFiles(e.target.value);
-        showAutocomplete(matches);
-    });
+    if (elements.contextFileInput) {
+        elements.contextFileInput.addEventListener('input', (e) => {
+            const matches = filterFiles(e.target.value);
+            showAutocomplete(matches);
+        });
+    }
 
     document.addEventListener('click', (e) => {
-        if (e.target !== elements.contextFileInput) {
-            elements.autocompleteList.classList.add('hidden');
+        if (elements.contextFileInput && e.target !== elements.contextFileInput) {
+            if (elements.autocompleteList) {
+                elements.autocompleteList.classList.add('hidden');
+            }
         }
     });
 
-    elements.addContextFileBtn.addEventListener('click', () => {
-        const fileName = elements.contextFileInput.value.trim();
-        if (fileName && allFiles.includes(fileName)) {
-            const li = document.createElement('li');
-            li.textContent = fileName;
-            const removeBtn = document.createElement('button');
-            removeBtn.textContent = 'x';
-            removeBtn.addEventListener('click', () => li.remove());
-            li.appendChild(removeBtn);
-            elements.userContextFilesList.appendChild(li);
-            elements.contextFileInput.value = '';
-        }
-    });
+    if (elements.addContextFileBtn) {
+        elements.addContextFileBtn.addEventListener('click', () => {
+            if (elements.contextFileInput && elements.userContextFilesList) {
+                const fileName = elements.contextFileInput.value.trim();
+                if (fileName && allFiles.includes(fileName)) {
+                    const existingFiles = [...elements.userContextFilesList.querySelectorAll('li')].map(li => li.firstChild.textContent.trim());
+                    if (existingFiles.includes(fileName)) {
+                        elements.contextFileInput.value = '';
+                        return; // Avoid adding duplicates
+                    }
+
+                    const li = document.createElement('li');
+                    li.textContent = fileName;
+                    const removeBtn = document.createElement('button');
+                    removeBtn.textContent = 'x';
+                    removeBtn.addEventListener('click', () => li.remove());
+                    li.appendChild(removeBtn);
+                    elements.userContextFilesList.appendChild(li);
+                    elements.contextFileInput.value = '';
+                }
+            }
+        });
+    }
 
     // --- INITIALIZATION ---
     pollStatus(); // Initial call

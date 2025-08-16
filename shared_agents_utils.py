@@ -286,7 +286,7 @@ Focus on the file's primary purpose, its key functions, classes, and their respo
 Mention any important logic or side effects. The summary should be concise and informative.
 """
         self.summarizer_agent = Agent(
-            self._get_gemini_model("gemini-1.5-flash-latest"),
+            self._get_gemini_model("gemini-2.5-flash"),
             output_type=str,
             system_prompt=summarizer_system_prompt,
         )
@@ -298,7 +298,7 @@ Mention any important logic or side effects. The summary should be concise and i
         Configures and returns a specific Gemini model instance.
 
         Args:
-            model_name: The name of the Gemini model to use (e.g., 'gemini-1.5-pro-latest').
+            model_name: The name of the Gemini model to use (e.g., 'gemini-2.5-pro-latest').
             temperature: The creativity of the model, from 0.0 to 1.0.
 
         Returns:
