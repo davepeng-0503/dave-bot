@@ -3,6 +3,7 @@
 Utilities shared across different AI agents, including file operations,
 base AI agent configuration, and context management.
 """
+import difflib
 import hashlib
 import logging
 import os
@@ -119,6 +120,58 @@ def write_file_content(directory: str, file_path: str, content: str) -> None:
         logging.info(f"✅ Successfully wrote changes to {full_path}")
     except Exception as e:
         logging.error(f"❌ Error writing to file {full_path}: {e}")
+
+
+def get_git_diff(directory: str, file_path: str, new_content: str) -> str:
+    """
+    Generates a git-style diff for a file between its HEAD version and new content.
+
+    Args:
+        directory: The base directory of the project.
+        file_path: The relative path to the file.
+        new_content: The new content of the file.
+
+    Returns:
+        A string containing the unified diff, or a message if no changes or an error occurs.
+    """
+    original_content = ""
+    try:
+        # Get the content of the file from the last commit (HEAD)
+        result = subprocess.run(
+            ["git", "show", f"HEAD:{file_path}"],
+            cwd=directory,
+            capture_output=True,
+            text=True,
+            check=False,  # Don't throw on error (e.g., new file)
+            encoding="utf-8",
+        )
+        if result.returncode == 0:
+            original_content = result.stdout
+        else:
+            # This is likely a new file, so the original content is empty.
+            logging.info(f"Could not get HEAD version of '{file_path}'. Assuming it's a new file.")
+            original_content = ""
+
+    except FileNotFoundError:
+        logging.error("❌ 'git' command not found. Cannot generate diff.")
+        return "Diff could not be generated because 'git' is not installed."
+    except Exception as e:
+        logging.error(f"❌ Error getting original file content for diff for {file_path}: {e}")
+        return f"Error generating diff: {e}"
+
+    # Use difflib to generate the diff
+    diff = difflib.unified_diff(
+        original_content.splitlines(keepends=True),
+        new_content.splitlines(keepends=True),
+        fromfile=f"a/{file_path}",
+        tofile=f"b/{file_path}",
+    )
+
+    diff_str = "".join(diff)
+    if not diff_str:
+        return "No changes detected."
+        
+    return diff_str
 
 
 # --- Agent Tools ---
