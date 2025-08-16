@@ -190,6 +190,22 @@ class AgentTools:
         """
         self.directory = directory
         self.status_queue = status_queue
+        self.tool_logs: List[Dict[str, Any]] = []
+
+    def reset_tool_logs(self):
+        """Clears the history of tool calls."""
+        self.tool_logs = []
+        logging.info("Tool logs have been reset.")
+
+    def _log_tool_call(self, tool_name: str, tool_input: Dict[str, Any]):
+        """Logs a tool call and sends an update to the status queue."""
+        log_entry = {"tool_name": tool_name, "tool_input": tool_input}
+        self.tool_logs.append(log_entry)
+        if self.status_queue:
+            self.status_queue.put({
+                "status": "planning",
+                "tool_logs": self.tool_logs,
+            })
 
     def git_grep_search(self, query: str) -> str:
         """
@@ -197,12 +213,7 @@ class AgentTools:
         This function is intended to be used as a tool by AI agents.
         """
         logging.info(f"🛠️ Running git grep search for: '{query}' in '{self.directory}'")
-        if self.status_queue:
-            self.status_queue.put({
-                "status": "tool_used",
-                "tool_name": "git_grep_search",
-                "tool_input": {"query": query},
-            })
+        self._log_tool_call("git_grep_search", {"query": query})
         try:
             result = subprocess.run(
                 ['git', 'grep', '-i', '-n', query],
@@ -233,12 +244,7 @@ class AgentTools:
         This is a tool for an AI agent.
         """
         logging.info(f"Agent tool reading file: {file_path}")
-        if self.status_queue:
-            self.status_queue.put({
-                "status": "tool_used",
-                "tool_name": "read_file",
-                "tool_input": {"file_path": file_path},
-            })
+        self._log_tool_call("read_file", {"file_path": file_path})
         content = read_file_content(self.directory, file_path)
         if content is None:
             # read_file_content already logs the specific error
@@ -280,7 +286,7 @@ Focus on the file's primary purpose, its key functions, classes, and their respo
 Mention any important logic or side effects. The summary should be concise and informative.
 """
         self.summarizer_agent = Agent(
-            self._get_gemini_model("gemini-2.5-flash"),
+            self._get_gemini_model("gemini-1.5-flash-latest"),
             output_type=str,
             system_prompt=summarizer_system_prompt,
         )
@@ -292,7 +298,7 @@ Mention any important logic or side effects. The summary should be concise and i
         Configures and returns a specific Gemini model instance.
 
         Args:
-            model_name: The name of the Gemini model to use (e.g., 'gemini-2.5-pro').
+            model_name: The name of the Gemini model to use (e.g., 'gemini-1.5-pro-latest').
             temperature: The creativity of the model, from 0.0 to 1.0.
 
         Returns:
