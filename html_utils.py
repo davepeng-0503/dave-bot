@@ -824,6 +824,7 @@ def create_code_agent_html_viewer(port: int, all_repo_files: List[str]) -> Optio
                     state.pollingActive = false;
                     showMessage('Connection Error', 'Connection to the agent was lost. Please check the console output.', true);
                     console.error('Error polling status:', err);
+                    window.close();
                 }});
         }}
 
