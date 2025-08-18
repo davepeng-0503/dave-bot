@@ -13,6 +13,7 @@ from typing import Any, Callable, Dict, List, Optional, Set
 import markdown
 from code_agent_models import CodeAnalysis, GeneratedCode, NewFile
 
+from pydantic import BaseModel
 from pydantic_ai import Agent
 from pydantic_ai.models.google import GoogleModelSettings
 
@@ -51,6 +52,40 @@ class AiCodeAgent(BaseAiAgent):
         logging.info(message)
         if self.status_queue:
             self.status_queue.put({"status": "cli_log", "message": message, "icon": icon, "cssClass": ""})
+
+    def generate_detailed_task(self, prompt: str) -> str:
+        """Expands a user's prompt into a more detailed task for the AI agent."""
+        system_prompt = """
+You are an expert software developer. Your task is to take a user's high-level prompt and expand it into a detailed, actionable task description for another AI agent to execute.
+
+**Instructions**:
+1.  Read the user's prompt carefully.
+2.  Clarify the requirements.
+3.  Break down the request into smaller, logical steps if necessary.
+4.  Specify the desired outcome clearly.
+5.  Do not write code. Your output should be a natural language description of the task.
+6.  The output should be a single block of text.
+"""
+        
+        user_prompt = f"Here is the user's prompt: \"{prompt}\"\n\nPlease expand this into a detailed task description."
+
+        class DetailedTask(BaseModel):
+            task_description: str
+
+        task_generation_agent = Agent(
+            self._get_gemini_model('gemini-2.5-flash'),
+            output_type=DetailedTask,
+            system_prompt=system_prompt
+        )
+        
+        self._log_info(f"Generating detailed task from prompt: '{prompt}'...", icon="✨")
+        
+        response = task_generation_agent.run_sync(
+            user_prompt,
+            model_settings=GoogleModelSettings(google_safety_settings=self.get_safety_settings()),
+        )
+        
+        return response.output.task_description
 
     def get_initial_analysis(self, task: str, file_list: List[str], app_description: str = "", feedback: Optional[str] = None, previous_plan: Optional[CodeAnalysis] = None, git_grep_search_tool: Optional[Callable[..., Any]] = None, read_file_tool: Optional[Callable[..., Any]] = None, grep_results: Optional[str] = None) -> CodeAnalysis:
         """Runs the agent to get the code analysis, potentially using feedback or a search tool."""
@@ -645,6 +680,37 @@ class CliManager:
                     else:
                         # Serve the main HTML file for other paths
                         super().do_GET()
+                
+                def do_POST(self):
+                    """Handles POST requests for user actions, including new task-related actions."""
+                    if self.path in ["/approve", "/reject", "/feedback", "/user_input", "/generate_task", "/start_analysis"]:
+                        content_length = int(self.headers.get("Content-Length", 0))
+                        post_data = self.rfile.read(content_length)
+
+                        action = self.path.lstrip("/")
+                        data: Optional[Any] = None
+
+                        if post_data:
+                            try:
+                                data = json.loads(post_data)
+                            except json.JSONDecodeError:
+                                self._send_response(400, "text/plain", b"Invalid JSON")
+                                return
+
+                        self.server.set_decision(action, data)
+
+                        success_message = (
+                            f"Decision '{action}' received. You can close this window."
+                        )
+                        self._send_response(
+                            200,
+                            "text/html",
+                            f"<html><body><p>{success_message}</p><script>window.close();</script></body></html>".encode(
+                                "utf-8"
+                            ),
+                        )
+                    else:
+                        self._send_response(404, "text/plain", b"Not Found")
 
             server = ApprovalWebServer(('', self.args.port), StatusAwareApprovalHandler, html_file_path=os.path.realpath(viewer_html_path))
             server_thread = threading.Thread(target=server.serve_forever)
@@ -657,15 +723,46 @@ class CliManager:
 
         analysis: Optional[CodeAnalysis] = None
         try:
-            # 3. Analysis and Confirmation Loop
+            # 3. Task Definition Step (if interactive)
+            if not self.args.force and server:
+                self.status_queue.put({"status": "awaiting_task", "initial_task": self.args.task})
+                
+                while True: # Loop for task definition phase
+                    decision, data = server.wait_for_decision()
+                    
+                    if decision == 'generate_task':
+                        prompt = data.get('prompt') if isinstance(data, dict) else ''
+                        if prompt:
+                            generated_task = self.ai_agent.generate_detailed_task(prompt)
+                            self.status_queue.put({"status": "task_generated", "task": generated_task})
+                        else:
+                            self._log_warning("Received generate_task request with no prompt.")
+                        server.reset_decision()
+                        continue # Wait for next action
+                    
+                    elif decision == 'start_analysis':
+                        final_task = data.get('task') if isinstance(data, dict) else self.args.task
+                        if not final_task:
+                            self._log_error("Cannot start analysis with an empty task.")
+                            self.status_queue.put({"status": "error", "message": "Cannot start analysis with an empty task."})
+                            return
+                        
+                        self.args.task = final_task # Update task with the final version from UI
+                        self._log_info(f"Starting analysis with final task: '{self.args.task}'", icon="🚀")
+                        server.reset_decision()
+                        break # Exit task definition loop and proceed to analysis
+                    
+                    else: # Handle unexpected decisions or user closing the tab
+                        self._log_error(f"Aborted during task definition. Decision: '{decision}'.")
+                        if server: self.status_queue.put({"status": "error", "message": f"Operation cancelled during task definition. Decision: {decision}"})
+                        return
+
+            # 4. Analysis and Confirmation Loop
             previous_analysis: Optional[CodeAnalysis] = None
             user_feedback: Optional[str] = None
             feedback_loop = 0
             while True:  # This loop handles user feedback on the plan
                 # A. Get Analysis
-                if server and feedback_loop == 0:
-                    self.status_queue.put({"status": "planning"})
-
                 if user_feedback:
                     analysis = self.ai_agent.get_initial_analysis(
                         self.args.task, all_repo_files, app_desc_content,
@@ -817,10 +914,10 @@ class CliManager:
                         return
                     break # Exit feedback loop
 
-            # 4. Iterative Generation
+            # 5. Iterative Generation
             unprocessed_files = self._execute_generation_loop(analysis, all_repo_files, app_desc_content)
             
-            # 5. Final Status
+            # 6. Final Status
             self._report_final_status(unprocessed_files)
 
             if not unprocessed_files:

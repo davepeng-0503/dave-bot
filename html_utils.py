@@ -569,6 +569,7 @@ def create_code_agent_html_viewer(port: int, all_repo_files: List[str]) -> Optio
         
         let state = {{
             task: '',
+            initial_task: '',
             plan: null,
             status: 'initializing',
             totalFiles: 0,
@@ -585,6 +586,46 @@ def create_code_agent_html_viewer(port: int, all_repo_files: List[str]) -> Optio
         }}
 
         // RENDER FUNCTIONS
+        function renderInitializingView() {{
+            mainContainer.innerHTML = `
+                <div id="initializing-view" class="view active">
+                    <div class="container">
+                        <h1>🤖 AI Code Agent</h1>
+                        <p>Connecting to agent...</p>
+                    </div>
+                </div>
+            `;
+        }}
+
+        function renderTaskDefinitionView() {{
+            mainContainer.innerHTML = `
+            <div id="task-definition-view" class="view active">
+                <div class="container">
+                    <h1>Define Your Task</h1>
+                    <p>Start with your initial prompt. You can refine it directly or use the AI to help generate a more detailed task specification.</p>
+                    
+                    <div class="feedback-form" style="text-align: left; margin-top: 2rem;">
+                        <h3>Initial Prompt</h3>
+                        <p>This is the prompt you provided on the command line. You can edit it here.</p>
+                        <textarea id="initial-prompt-input">${{escapeHtml(state.initial_task)}}</textarea>
+                        
+                        <div class="actions" style="border-top: none; padding-top: 1rem; margin-top: 1rem;">
+                            <button id="generate-task-btn" class="feedback-btn" onclick="generateTask()">✨ Generate Detailed Task</button>
+                        </div>
+
+                        <h3>Final Task for Agent</h3>
+                        <p>This is the task that will be sent to the agent for planning. You can edit it at any time.</p>
+                        <textarea id="final-task-input" placeholder="The detailed task for the AI agent will appear here...">${{escapeHtml(state.initial_task)}}</textarea>
+                    </div>
+
+                    <div class="actions" style="margin-top: 2rem;">
+                        <button id="start-analysis-btn" class="approve-btn" onclick="startAnalysis()">Start Analysis</button>
+                    </div>
+                </div>
+            </div>
+            `;
+        }}
+
         function renderPlanningView(message = 'Analyzing your request...') {{
             state.timelineItemCounter = 0;
             state.additionalContextFiles = []; // Reset for new plan
@@ -913,6 +954,18 @@ def create_code_agent_html_viewer(port: int, all_repo_files: List[str]) -> Optio
             state.status = newStatus;
 
             switch (newStatus) {{
+                case 'awaiting_task':
+                    state.initial_task = data.initial_task;
+                    renderTaskDefinitionView();
+                    break;
+                
+                case 'task_generated':
+                    const finalTaskInput = document.getElementById('final-task-input');
+                    if (finalTaskInput) {{
+                        finalTaskInput.value = data.task;
+                    }}
+                    break;
+
                 case 'cli_log':
                     addGenericTimelineItem(data.message, data.icon, data.cssClass);
                     break;
@@ -1069,6 +1122,55 @@ def create_code_agent_html_viewer(port: int, all_repo_files: List[str]) -> Optio
             }}
         }}
 
+        // --- ACTION FUNCTIONS ---
+        function startAnalysis() {{
+            const finalTask = document.getElementById('final-task-input').value;
+            if (!finalTask) {{
+                alert('Please provide a task for the agent.');
+                return;
+            }}
+            
+            state.task = finalTask; // Store the final task in state
+            renderPlanningView(`Analyzing your request...`);
+
+            const payload = {{ task: finalTask }};
+
+            fetch(`http://localhost:${{port}}/start_analysis`, {{
+                method: 'POST',
+                headers: {{ 'Content-Type': 'application/json' }},
+                body: JSON.stringify(payload)
+            }}).catch(err => {{
+                showMessage('Error', "Could not start analysis. Check the agent's console.", true);
+                console.error('Error sending start_analysis request:', err);
+            }});
+        }}
+
+        function generateTask() {{
+            const initialPrompt = document.getElementById('initial-prompt-input').value;
+            const generateBtn = document.getElementById('generate-task-btn');
+            const finalTaskInput = document.getElementById('final-task-input');
+
+            generateBtn.disabled = true;
+            generateBtn.textContent = 'Generating...';
+            finalTaskInput.value = 'AI is thinking...';
+
+            const payload = {{ prompt: initialPrompt }};
+
+            fetch(`http://localhost:${{port}}/generate_task`, {{
+                method: 'POST',
+                headers: {{ 'Content-Type': 'application/json' }},
+                body: JSON.stringify(payload)
+            }})
+            .catch(err => {{
+                finalTaskInput.value = 'Error generating task. Please try again or write the task manually.';
+                console.error('Error sending generate_task request:', err);
+            }})
+            .finally(() => {{
+                generateBtn.disabled = false;
+                generateBtn.textContent = '✨ Generate Detailed Task';
+            }});
+        }}
+
         function sendDecision(decision) {{
             if (decision === 'approve') {{
                 const useFlash = document.getElementById('use-flash-model').checked;
@@ -1157,7 +1259,7 @@ def create_code_agent_html_viewer(port: int, all_repo_files: List[str]) -> Optio
 
         // INITIALIZATION
         document.addEventListener('DOMContentLoaded', () => {{
-            renderPlanningView();
+            renderInitializingView();
             state.pollingActive = true;
             pollStatus();
         }});
