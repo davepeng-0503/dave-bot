@@ -16,7 +16,7 @@ from typing import Any, Optional, Tuple
 class ApprovalWebServer(socketserver.TCPServer):
     """A simple web server to get user approval for a plan."""
 
-    allow_reuse_address = True
+    allow_reuse_address = False
 
     def __init__(self, server_address: Tuple[str, int], RequestHandlerClass: Any, html_file_path: str):
         super().__init__(server_address, RequestHandlerClass)

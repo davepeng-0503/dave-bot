@@ -9,7 +9,7 @@ import subprocess
 import threading
 import time
 import webbrowser
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 import markdown
 from code_agent_models import CodeAnalysis, GeneratedCode, NewFile
 
@@ -670,11 +670,6 @@ class CliManager:
             if actual_port != self.args.port:
                 self._log_info(f"Port {self.args.port} was in use. Switched to port {actual_port}.", icon="🔌")
 
-            viewer_html_path = create_code_agent_html_viewer(actual_port, all_repo_files)
-            if not viewer_html_path:
-                self._log_error("Failed to create the HTML viewer file.")
-                return
-
             class StatusAwareApprovalHandler(ApprovalHandler):
                 cli_manager = self
                 def do_GET(self):
@@ -720,20 +715,35 @@ class CliManager:
                         )
                     else:
                         self._send_response(404, "text/plain", b"Not Found")
+
+            def start_server(port: int=actual_port, retries: int=0) -> Tuple[ApprovalWebServer, str | None]:
+                server = None
+                try:
+                    viewer_html_path = create_code_agent_html_viewer(port, all_repo_files)
+                    if not viewer_html_path:
+                        raise RuntimeError("Failed to create HTML viewer file.")
+                    server = ApprovalWebServer(('', port), StatusAwareApprovalHandler, html_file_path=os.path.realpath(viewer_html_path))
+                    server_thread = threading.Thread(target=server.serve_forever)
+                    server_thread.daemon = True
+                    server_thread.start()
+                    self._log_info(f"Interactive viewer is running on http://localhost:{port}. Opening in your browser...", icon="🌐")
+                    return server, viewer_html_path 
+                except OSError as e:
+                    self._log_error(f"Failed to start web server on port {port}: {e}")
+                    if server:
+                        server.shutdown()
+                        server.server_close()
+                    if retries < 15:
+                        return start_server(port + 1, retries + 1)
+                    else: 
+                        raise RuntimeError("Could not start server after multiple attempts.")
+                    
+
+            server, viewer_path = start_server(actual_port)
+            if viewer_path:
+                print(f"Interactive viewer is running on http://localhost:{actual_port}. Opening in your browser...")
+                webbrowser.open(f"file://{os.path.realpath(viewer_path)}")
             
-            try:
-                server = ApprovalWebServer(('', actual_port), StatusAwareApprovalHandler, html_file_path=os.path.realpath(viewer_html_path))
-                server_thread = threading.Thread(target=server.serve_forever)
-                server_thread.daemon = True
-                server_thread.start()
-                self._log_info(f"Interactive viewer is running on http://localhost:{actual_port}. Opening in your browser...", icon="🌐")
-                webbrowser.open(f"file://{os.path.realpath(viewer_html_path)}")
-            except OSError as e:
-                self._log_error(f"Failed to start web server on port {actual_port}: {e}")
-                if server:
-                    server.shutdown()
-                    server.server_close()
-                return
         else:
             self._log_info("Running in non-interactive mode due to --force flag.")
 
