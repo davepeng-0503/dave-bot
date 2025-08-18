@@ -53,29 +53,41 @@ class AiCodeAgent(BaseAiAgent):
         if self.status_queue:
             self.status_queue.put({"status": "cli_log", "message": message, "icon": icon, "cssClass": ""})
 
-    def generate_detailed_task(self, prompt: str) -> str:
+    def generate_detailed_task(self, prompt: str, git_grep_search_tool: Optional[Callable[..., Any]] = None, read_file_tool: Optional[Callable[..., Any]] = None) -> str:
         """Expands a user's prompt into a more detailed task for the AI agent."""
         system_prompt = """
 You are an expert software developer. Your task is to take a user's high-level prompt and expand it into a detailed, actionable task description for another AI agent to execute.
 
+You have access to the following tools to explore the codebase if needed:
+1.  **`git_grep_search_tool(query: str)`**: Helps you find relevant code snippets and file locations.
+2.  **`read_file_tool(file_path: str)`**: Reads the entire content of a specific file.
+
 **Instructions**:
 1.  Read the user's prompt carefully.
-2.  Clarify the requirements.
-3.  Break down the request into smaller, logical steps if necessary.
-4.  Specify the desired outcome clearly.
-5.  Do not write code. Your output should be a natural language description of the task.
-6.  The output should be a single block of text.
+2.  Use the tools to understand the current state of the code if the prompt is about modifying existing functionality.
+3.  Clarify the requirements.
+4.  Break down the request into smaller, logical steps if necessary.
+5.  Specify the desired outcome clearly.
+6.  Do not write code. Your output should be a natural language description of the task.
+7.  The output should be a single block of text.
 """
         
-        user_prompt = f"Here is the user's prompt: \"{prompt}\"\n\nPlease expand this into a detailed task description."
+        user_prompt = f"Here is the user's prompt: \"{prompt}\"\n\nPlease expand this into a detailed task description. Use the provided tools to explore the codebase if necessary to create a more accurate and detailed task."
 
         class DetailedTask(BaseModel):
             task_description: str
 
+        tools: List[Callable[..., Any]] = []
+        if git_grep_search_tool:
+            tools.append(git_grep_search_tool)
+        if read_file_tool:
+            tools.append(read_file_tool)
+
         task_generation_agent = Agent(
             self._get_gemini_model('gemini-2.5-flash'),
             output_type=DetailedTask,
-            system_prompt=system_prompt
+            system_prompt=system_prompt,
+            tools=tools
         )
         
         self._log_info(f"Generating detailed task from prompt: '{prompt}'...", icon="✨")
@@ -759,7 +771,11 @@ class CliManager:
                     if decision == 'generate_task':
                         prompt = data.get('prompt') if isinstance(data, dict) else ''
                         if prompt:
-                            generated_task = self.ai_agent.generate_detailed_task(prompt)
+                            generated_task = self.ai_agent.generate_detailed_task(
+                                prompt,
+                                git_grep_search_tool=self.agent_tools.git_grep_search,
+                                read_file_tool=self.agent_tools.read_file
+                            )
                             self.status_queue.put({"status": "task_generated", "task": generated_task})
                         else:
                             self._log_warning("Received generate_task request with no prompt.")
