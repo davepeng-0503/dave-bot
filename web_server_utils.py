@@ -7,6 +7,7 @@ before applying changes.
 import http.server
 import json
 import logging
+import socket
 import socketserver
 import threading
 from typing import Any, Optional, Tuple
@@ -116,6 +117,32 @@ class ApprovalHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:
         """Suppress logging to keep the console clean."""
         return
+
+
+def find_available_port(start_port: int, max_retries: int = 100) -> Optional[int]:
+    """
+    Finds an available TCP port on the local machine by trying to bind to it.
+
+    Args:
+        start_port: The port number to start searching from.
+        max_retries: The maximum number of ports to try.
+
+    Returns:
+        An available port number, or None if no port is found within the range.
+    """
+    for i in range(max_retries):
+        port = start_port + i
+        try:
+            # Create a socket, try to bind it, and then close it.
+            # This is a reliable way to check if a port is available.
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(("127.0.0.1", port))
+            return port
+        except OSError:
+            logging.info(f"Port {port} is already in use, trying next port.")
+    
+    logging.error(f"Could not find an available port in the range {start_port}-{start_port + max_retries - 1}.")
+    return None
 
 
 def wait_for_user_approval_from_browser(
