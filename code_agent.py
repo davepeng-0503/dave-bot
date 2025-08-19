@@ -53,23 +53,29 @@ class AiCodeAgent(BaseAiAgent):
         if self.status_queue:
             self.status_queue.put({"status": "cli_log", "message": message, "icon": icon, "cssClass": ""})
 
-    def generate_detailed_task(self, prompt: str, git_grep_search_tool: Optional[Callable[..., Any]] = None, read_file_tool: Optional[Callable[..., Any]] = None) -> str:
+    def generate_detailed_task(self, prompt: str, file_list: List[str], git_grep_search_tool: Optional[Callable[..., Any]] = None, read_file_tool: Optional[Callable[..., Any]] = None) -> str:
         """Expands a user's prompt into a more detailed task for the AI agent."""
-        system_prompt = """
+        system_prompt = f"""
 You are an expert software developer. Your task is to take a user's high-level prompt and expand it into a detailed, actionable task description for another AI agent to execute.
 
-You have access to the following tools to explore the codebase if needed:
-1.  **`git_grep_search_tool(query: str)`**: Helps you find relevant code snippets and file locations.
-2.  **`read_file_tool(file_path: str)`**: Reads the entire content of a specific file.
 
-**Instructions**:
-1.  Read the user's prompt carefully.
-2.  Use the tools to understand the current state of the code if the prompt is about modifying existing functionality.
-3.  Clarify the requirements.
-4.  Break down the request into smaller, logical steps if necessary.
-5.  Specify the desired outcome clearly.
-6.  Do not write code. Your output should be a natural language description of the task.
-7.  The output should be a single block of text.
+Full list of files in the repository:
+{json.dumps(file_list, indent=2)}
+
+You have access to the following tools to explore the codebase if the prompt requires it:
+1.  `git_grep_search_tool(query: str)`: Finds relevant code snippets and file locations.
+2.  `read_file_tool(file_path: str)`: Reads the content of a specific file.
+
+**Your Workflow**:
+1.  **Analyze the Prompt**: First, carefully read the user's prompt.
+2.  **Assess Information**: Ask yourself: "Do I have enough information to write a detailed and actionable task description?"
+3.  **Use Tools (If Necessary)**: If, and only if, the prompt refers to existing code or lacks clarity, use the provided tools to gather the necessary context. Do not use tools if the prompt is self-contained.
+4.  **Generate Final Output**: Once you have gathered sufficient information (or if you never needed to use tools), you MUST stop using tools and generate the final task description. Your final response must be the detailed task.
+
+**Crucial Rules**:
+- **Do not write code.** Your output is a natural language description for another AI.
+- **Goal-Oriented Tool Use**: Use tools to answer specific questions, not to explore aimlessly.
+- **Stop and Finalize**: After your final tool call, provide the complete task description as your final answer.
 """
         
         user_prompt = f"Here is the user's prompt: \"{prompt}\"\n\nPlease expand this into a detailed task description. Use the provided tools to explore the codebase if necessary to create a more accurate and detailed task."
@@ -87,7 +93,7 @@ You have access to the following tools to explore the codebase if needed:
             self._get_gemini_model('gemini-2.5-flash'),
             output_type=DetailedTask,
             system_prompt=system_prompt,
-            tools=tools
+            tools=tools,
         )
         
         self._log_info(f"Generating detailed task from prompt: '{prompt}'...", icon="✨")
@@ -773,6 +779,7 @@ class CliManager:
                         if prompt:
                             generated_task = self.ai_agent.generate_detailed_task(
                                 prompt,
+                                file_list=all_repo_files,
                                 git_grep_search_tool=self.agent_tools.git_grep_search,
                                 read_file_tool=self.agent_tools.read_file
                             )
