@@ -1,8 +1,8 @@
-This repository contains an AI-powered developer assistant tool designed to automate parts of the software development lifecycle. The tool is built in Python and leverages Google's Gemini models (specifically Gemini 2.5 Pro and Flash) via the `pydantic-ai` library to understand and manipulate code within a git repository.
+This repository contains AI-powered assistant tools designed to automate and aid in various tasks. The tools are built in Python and leverage Google's Gemini models via the `pydantic-ai` library.
 
-The agent is designed to be interactive, presenting its plans in a web browser for user approval before taking action.
+The agents are designed to be interactive, presenting their interfaces in a web browser for user interaction.
 
-The primary agent is:
+The repository contains two primary agents:
 
 1.  **Code Agent (`code_agent.py`)**:
     *   **Purpose**: To autonomously perform coding tasks based on a natural language description.
@@ -17,15 +17,29 @@ The primary agent is:
         *   `GeneratedCode`: Defines the output structure for file generation, including the code itself and context management fields.
     *   **Usage**: Run from the command line with a `--task` argument describing the desired change.
 
+2.  **Teaching Bot (`teaching_bot_cli.py`)**:
+    *   **Purpose**: To act as an AI-powered tutor, educating a user on a subject of their choice through an interactive conversation.
+    *   **Workflow**:
+        1.  Launches a local web server that provides a real-time chat interface in the user's browser.
+        2.  It greets the user and asks what subject they would like to learn about.
+        3.  Based on the user's responses, it follows a structured teaching methodology: explaining concepts, providing examples, asking questions to test understanding, and offering constructive feedback.
+        4.  It maintains the state of the conversation using a `TeachingState` model, which tracks the subject, topics covered, and the user's understanding level.
+        5.  Each turn, the AI decides on a `TeachingAction` to perform, which dictates its response and behavior.
+    *   **Key Pydantic Models**:
+        *   `TeachingState`: Manages the entire state of the learning session.
+        *   `TeachingAction`: Defines the bot's next move, such as explaining, asking a question, or giving feedback.
+    *   **Usage**: Run `teaching_bot_cli.py` from the command line to start the interactive session.
+
 **Shared Components**:
-These files contain common code shared across the agent.
+These files contain common code shared across the agents.
 *   **`shared_agents_utils.py`**:
     *   File system operations (`read_file_content`, `write_file_content`).
     *   Git integration (`get_git_files`, `git_grep_search`).
     *   A `BaseAiAgent` class for handling Google API key loading and model configuration.
     *   A context-building function that can summarize files if the total context exceeds a size limit.
-    *   **A local web server for handling the interactive user approval workflow.**
-*   **`html_utils.py`**:
-    *   Contains functions to generate the HTML page used by the Code Agent to display plans and results to the user in their browser.
+*   **`web_server_utils.py` & `teaching_bot_web_server_utils.py`**:
+    *   Provide simple, reusable web servers and request handlers for the agents' user interaction flows.
+*   **`html_utils.py` & `teaching_bot_html_utils.py`**:
+    *   Contain functions to generate the HTML pages used by the agents to display their user interfaces in the browser.
 
-The overall goal of this project is to create an intelligent, interactive agent that can reliably and effectively assist human developers with coding tasks, directly within their local development environment.
+The overall goal of this project is to create intelligent, interactive agents that can reliably and effectively assist human developers and learners.
