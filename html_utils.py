@@ -688,7 +688,7 @@ def create_code_agent_html_viewer(port: int, all_repo_files: List[str]) -> Optio
                 <h1>🤖 AI Code Generation Plan</h1>
                 <div class="container">
                     <h2>Task</h2>
-                    <p>${{escapeHtml(task)}}</p>
+                    ${{task}}
                 </div>
                 <div class="container">
                     <h2>High-level Plan</h2>

@@ -55,9 +55,10 @@ class AiCodeAgent(BaseAiAgent):
 
     def generate_detailed_task(self, prompt: str, file_list: List[str], git_grep_search_tool: Optional[Callable[..., Any]] = None, read_file_tool: Optional[Callable[..., Any]] = None) -> str:
         """Expands a user's prompt into a more detailed task for the AI agent."""
+    
+        # The system prompt is now framed from the perspective of a UX-focused Product Manager.
         system_prompt = f"""
-You are an expert software developer. Your task is to take a user's high-level prompt and expand it into a detailed, actionable task description for another AI agent to execute.
-
+You are an expert AI Product Manager with a deep understanding of User Experience (UX). Your primary role is to take a user's high-level goal and translate it into a clear, actionable, and user-centric task description for an AI engineering agent. You don't dictate implementation details; instead, you define the problem, the user value, and the desired outcome.
 
 Full list of files in the repository:
 {json.dumps(file_list, indent=2)}
@@ -67,18 +68,20 @@ You have access to the following tools to explore the codebase if the prompt req
 2.  `read_file_tool(file_path: str)`: Reads the content of a specific file.
 
 **Your Workflow**:
-1.  **Analyze the Prompt**: First, carefully read the user's prompt.
-2.  **Assess Information**: Ask yourself: "Do I have enough information to write a detailed and actionable task description?"
-3.  **Use Tools (If Necessary)**: If, and only if, the prompt refers to existing code or lacks clarity, use the provided tools to gather the necessary context. Do not use tools if the prompt is self-contained.
-4.  **Generate Final Output**: Once you have gathered sufficient information (or if you never needed to use tools), you MUST stop using tools and generate the final task description. Your final response must be the detailed task.
+1.  **Analyze the User's Goal**: Carefully read the user's prompt. Go beyond the literal request to understand the "Why." What is the underlying problem the user is trying to solve?
+2.  **Consider the User Journey**: Think about the ideal user journey. How can we make this process intuitive, efficient, and enjoyable?
+3.  **Use Tools for Context**: If the request involves existing functionality, use the tools to understand the current state. This context is crucial for ensuring a seamless user experience.
+4.  **Define Success from a UX Lens**: Instead of a technical checklist, define what a successful outcome looks like for the user. Focus on clarity, efficiency, feedback, and accessibility.
+5.  **Generate the Final Task Description**: Synthesize your analysis into a detailed task for the engineering AI. Structure your output logically, covering the problem statement, a proposed solution overview, key user scenarios, and design/interaction principles.
 
 **Crucial Rules**:
-- **Do not write code.** Your output is a natural language description for another AI.
-- **Goal-Oriented Tool Use**: Use tools to answer specific questions, not to explore aimlessly.
+- **Do not write code.** Your output is a natural language description that guides the coding process.
+- **Focus on the "what" and "why," not the "how."** Empower the engineering agent to determine the best implementation.
 - **Stop and Finalize**: After your final tool call, provide the complete task description as your final answer.
 """
         
-        user_prompt = f"Here is the user's prompt: \"{prompt}\"\n\nPlease expand this into a detailed task description. Use the provided tools to explore the codebase if necessary to create a more accurate and detailed task."
+        # The user prompt is rephrased to present the task as a user need, reinforcing the PM persona.
+        user_prompt = f"A user has expressed the following need: \"{prompt}\"\n\nPlease apply your product management and UX expertise to expand this into a detailed, user-centric task description for our engineering agent."
 
         class DetailedTask(BaseModel):
             task_description: str
@@ -896,11 +899,11 @@ class CliManager:
                     analysis_for_view = analysis.model_copy(deep=True)
                     analysis_for_view.plan = [markdown.markdown(step) for step in analysis.plan]
                     analysis_for_view.reasoning = markdown.markdown(analysis.reasoning)
-                    
+                    task = markdown.markdown(self.args.task)
                     self.status_queue.put({
                         "status": "plan_ready",
                         "plan": analysis_for_view.model_dump(),
-                        "task": self.args.task
+                        "task": task
                     })
 
                     decision, data = server.wait_for_decision()
