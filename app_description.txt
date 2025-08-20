@@ -1,31 +1,52 @@
-This repository contains an AI-powered developer assistant tool designed to automate parts of the software development lifecycle. The tool is built in Python and leverages Google's Gemini models (specifically Gemini 2.5 Pro and Flash) via the `pydantic-ai` library to understand and manipulate code within a git repository.
+This repository contains an AI-powered developer assistant tool suite designed to automate and assist with the software development lifecycle. The tool is built in Python and leverages Google's Gemini models (specifically Gemini 2.5 Pro and Flash) via the `pydantic-ai` library to understand and manipulate code within a git repository.
 
-The agent is designed to be interactive, presenting its plans in a web browser for user approval before taking action.
+It features two primary agents:
 
-The primary agent is:
+1.  **Code Agent (`code_agent.py`)**: An autonomous agent that executes coding tasks based on a high-level description. It plans, generates code, and manages the git workflow from branch creation to pull request.
+2.  **Chatbot Agent (`chatbot_agent.py`)**: An intelligent conversational interface that answers questions about the codebase, provides analysis, and handles general knowledge queries by routing them to the most appropriate AI model.
 
-1.  **Code Agent (`code_agent.py`)**:
-    *   **Purpose**: To autonomously perform coding tasks based on a natural language description.
-    *   **Workflow**:
-        1.  It performs an initial analysis of the entire codebase to identify relevant files, files that need editing, and new files to be created. It uses a `git grep` tool to search the codebase and improve its analysis.
-        2.  It creates a comprehensive, dependency-aware plan for generating or modifying the necessary files.
-        3.  **Crucially, it presents this plan in a local web browser for the user to approve, reject, or provide feedback on before any code is written.**
-        4.  Upon approval, it iteratively generates or modifies files one by one. Its context management system allows it to request more information and re-run the analysis if it gets stuck.
-        5.  Once coding is complete, it automatically creates a new git branch, commits the changes, pushes the branch to the remote repository, and attempts to create a pull request.
-    *   **Key Pydantic Models**:
-        *   `CodeAnalysis`: Defines the structure for the initial plan, including files to read, edit, and create, along with a generation order.
-        *   `GeneratedCode`: Defines the output structure for file generation, including the code itself and context management fields.
-    *   **Usage**: Run from the command line with a `--task` argument describing the desired change.
+---
 
-**Shared Components**:
-These files contain common code shared across the agent.
+### 1. Code Agent (`code_agent.py`)
+
+*   **Purpose**: To autonomously perform coding tasks based on a natural language description.
+*   **Workflow**:
+    1.  It performs an initial analysis of the entire codebase to identify relevant files, files that need editing, and new files to be created. It uses a `git grep` tool to search the codebase and improve its analysis.
+    2.  It creates a comprehensive, dependency-aware plan for generating or modifying the necessary files.
+    3.  **Crucially, it presents this plan in a local web browser for the user to approve, reject, or provide feedback on before any code is written.**
+    4.  Upon approval, it iteratively generates or modifies files one by one. Its context management system allows it to request more information and re-run the analysis if it gets stuck.
+    5.  Once coding is complete, it automatically creates a new git branch, commits the changes, pushes the branch to the remote repository, and attempts to create a pull request.
+*   **Key Pydantic Models**:
+    *   `CodeAnalysis`: Defines the structure for the initial plan, including files to read, edit, and create, along with a generation order.
+    *   `GeneratedCode`: Defines the output structure for file generation, including the code itself and context management fields.
+*   **Usage**: Run from the command line with a `--task` argument describing the desired change.
+
+### 2. Chatbot Agent (`chatbot_agent.py`)
+
+*   **Purpose**: To act as an intelligent conversational interface for the codebase. It analyzes user queries in natural language and routes them to the most appropriate AI model and toolset for an efficient and accurate response, abstracting the complexity from the user.
+*   **Routing Logic**:
+    *   **Codebase-Specific Questions**: Fast, factual queries about the code (e.g., "Where is `html_utils.py`?") are routed to **Gemini 2.5 Flash** with file system tools (`git_grep`, `read_file`) for quick answers.
+    *   **General Knowledge Questions**: Queries not related to the codebase (e.g., "What is the difference between a list and a tuple?") are routed directly to **Gemini 2.5 Pro** for its broad knowledge base.
+    *   **Complex Tasks & Analysis**: Queries requiring deep reasoning about the code (e.g., "Analyze `code_agent.py` and suggest improvements") are routed to **Gemini 2.5 Pro** with file system tools, leveraging its advanced analytical capabilities.
+    *   **Ambiguous Queries**: If a query is unclear (e.g., "Tell me about agents"), the chatbot asks for clarification to ensure it understands the user's intent before proceeding.
+*   **Key Pydantic Models**:
+    *   `QueryAnalysis`: Defines the structure for categorizing the user's query.
+    *   `QueryCategory`: An enumeration of the possible query types (codebase, general, complex, ambiguous).
+*   **Usage**: Run from the command line to start an interactive chat session.
+
+---
+
+### Shared Components
+
+These files contain common code shared across the agents.
 *   **`shared_agents_utils.py`**:
     *   File system operations (`read_file_content`, `write_file_content`).
     *   Git integration (`get_git_files`, `git_grep_search`).
     *   A `BaseAiAgent` class for handling Google API key loading and model configuration.
     *   A context-building function that can summarize files if the total context exceeds a size limit.
-    *   **A local web server for handling the interactive user approval workflow.**
+*   **`code_agent_models.py`**:
+    *   Contains all Pydantic models used by both the Code Agent and the Chatbot Agent for structured input and output with the LLMs.
 *   **`html_utils.py`**:
     *   Contains functions to generate the HTML page used by the Code Agent to display plans and results to the user in their browser.
 
-The overall goal of this project is to create an intelligent, interactive agent that can reliably and effectively assist human developers with coding tasks, directly within their local development environment.
+The overall goal of this project is to create an intelligent, interactive suite of tools that can both autonomously execute complex coding tasks and act as a helpful conversational assistant, making developers more efficient within their local environment.

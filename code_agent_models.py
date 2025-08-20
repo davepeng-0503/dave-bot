@@ -1,5 +1,30 @@
+from enum import Enum
 from typing import List
 from pydantic import BaseModel, Field
+
+# --- Pydantic Models for Chatbot Agent ---
+
+class QueryCategory(str, Enum):
+    """Enumeration for the different categories of user queries."""
+    CODEBASE_SPECIFIC = "codebase_specific"
+    GENERAL_KNOWLEDGE = "general_knowledge"
+    COMPLEX_TASK = "complex_task"
+    AMBIGUOUS = "ambiguous"
+
+class QueryAnalysis(BaseModel):
+    """Analyzes and categorizes a user's query to route it to the correct agent."""
+    category: QueryCategory = Field(
+        description="The category that best fits the user's query."
+    )
+    reasoning: str = Field(
+        description="A brief explanation for why the query was placed in this category."
+    )
+    clarification_question: str = Field(
+        default="",
+        description="If the category is 'ambiguous', this field should contain a question for the user to clarify their intent. Otherwise, it should be empty."
+    )
+
+
 # --- Pydantic Models for Code Analysis & Generation ---
 
 class NewFile(BaseModel):
