@@ -2,6 +2,10 @@
 """
 This script provides a command-line interface to scrape restaurant information
 from Google Maps based on a search query and save it to a CSV file.
+
+It leverages a dynamic parsing approach where CSS classes for scraping are
+determined at runtime by analyzing a known example restaurant page. This makes
+the scraper more resilient to website updates.
 """
 
 import argparse
@@ -13,7 +17,8 @@ from typing import List
 import requests
 
 from code_agent_models import Restaurant
-from scraper_html_parser import parse_google_maps_restaurants
+# Import both the parser function and the class finder instance for testing.
+from scraper_html_parser import CLASS_FINDER, parse_google_maps_restaurants
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -81,17 +86,38 @@ def save_restaurants_to_csv(restaurants: List[Restaurant], output_file: str) -> 
         logging.error(f"Error writing to CSV file {output_file}: {e}")
 
 
+def test_class_finder():
+    """
+    Runs the dynamic class finder and prints the results for debugging.
+
+    This helps verify if the scraper can find the necessary CSS classes from
+    the example URL. If this fails, the main scraper will not work.
+    """
+    logging.info("--- Running Dynamic Class Finder Test ---")
+    class_names = CLASS_FINDER.get_class_names()
+    if class_names and all(class_names.values()):
+        logging.info("Successfully found all required dynamic class names:")
+        for key, value in class_names.items():
+            print(f"  - {key}: '{value}'")
+        logging.info("The scraper should be able to proceed.")
+    else:
+        logging.error("Failed to find one or more required class names.")
+        logging.error("Please check the EXAMPLE_URL and EXAMPLE_RESTAURANT in scraper_html_parser.py")
+        logging.error("The scraper will likely fail to parse data.")
+    logging.info("--- End of Test ---")
+
+
 def main():
     """
     Main function to run the scraper bot.
     """
     parser = argparse.ArgumentParser(
-        description="Google Places Scraper Bot for Restaurants."
+        description="Google Places Scraper Bot for Restaurants. Scrapes restaurant data from Google Maps.",
+        formatter_class=argparse.RawTextHelpFormatter
     )
     parser.add_argument(
         "--query",
         type=str,
-        required=True,
         help="The search query, e.g., 'restaurants in San Francisco'."
     )
     parser.add_argument(
@@ -100,7 +126,23 @@ def main():
         default="restaurants.csv",
         help="The path to the output CSV file (default: restaurants.csv)."
     )
+    parser.add_argument(
+        "--test-class-finder",
+        action="store_true",
+        help=(
+            "Run only the dynamic class finder for the example URL.\n"
+            "This is useful for debugging if the scraper stops working.\n"
+            "It will print the CSS classes it finds based on the hardcoded example."
+        )
+    )
     args = parser.parse_args()
+
+    if args.test_class_finder:
+        test_class_finder()
+        return
+
+    if not args.query:
+        parser.error("--query is required for scraping. Use --help for more options.")
 
     logging.info(f"Starting scraper for query: '{args.query}'")
 
@@ -113,6 +155,7 @@ def main():
             save_restaurants_to_csv(restaurants, args.output_file)
         else:
             logging.warning("Could not parse any restaurant data from the HTML. The website structure might have changed.")
+            logging.warning("Try running with --test-class-finder to see if the dynamic class discovery is working.")
     else:
         logging.error("Could not retrieve HTML content. Aborting.")
 
