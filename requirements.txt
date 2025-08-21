@@ -3,3 +3,6 @@ pydantic
 pydantic-ai
 python-dotenv
 markdown
+requests
+beautifulsoup4
+lxml

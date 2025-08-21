@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Optional
 from pydantic import BaseModel, Field
 # --- Pydantic Models for Code Analysis & Generation ---
 
@@ -80,3 +80,15 @@ class GeneratedCode(BaseModel):
 class GeneratedCodeWithDiff(GeneratedCode):
     """Represents a generated code file along with its git diff."""
     git_diff: str = Field(description="The git diff of the changes for the file.")
+
+# --- Pydantic Models for Google Places Scraper Bot ---
+
+class Restaurant(BaseModel):
+    """Represents the structured information for a single restaurant."""
+    name: str = Field(description="The name of the restaurant.")
+    address: Optional[str] = Field(default=None, description="The full address of the restaurant.")
+    phone_number: Optional[str] = Field(default=None, description="The contact phone number of the restaurant.")
+    website: Optional[str] = Field(default=None, description="The official website of the restaurant.")
+    rating: Optional[float] = Field(default=None, description="The average user rating, typically out of 5.")
+    reviews_count: Optional[int] = Field(default=None, description="The total number of user reviews.")
+    cuisine: Optional[List[str]] = Field(default=[], description="A list of cuisines or categories the restaurant belongs to.")
