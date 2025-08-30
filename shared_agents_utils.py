@@ -16,6 +16,7 @@ from google.genai.types import HarmBlockThreshold, HarmCategory, SafetySettingDi
 from pydantic_ai import Agent
 from pydantic_ai.models.google import GoogleModel, GoogleModelSettings
 from pydantic_ai.providers.google import GoogleProvider
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 # --- Configuration ---
 CONTEXT_SIZE_LIMIT = (
@@ -194,7 +195,7 @@ class AgentTools:
     def git_grep_search(self, query: str) -> str:
         """
         Performs a case-insensitive 'git grep' search in the codebase.
-        This function is intended to be used as a tool by AI agents.
+        This function is intended to be used as a tool by an AI agent.
         """
         logging.info(f"🛠️ Running git grep search for: '{query}' in '{self.directory}'")
         if self.status_queue:
@@ -246,6 +247,35 @@ class AgentTools:
 
         return f"--- Content of {file_path} ---\n{content}"
 
+# --- AI Agent Utilities ---
+
+class RetryingAgent(Agent):
+    """
+    An Agent wrapper that adds retry logic with exponential backoff to AI calls.
+    """
+    def run_sync(self, *args, **kwargs):
+        """
+        Overrides the base run_sync method to add tenacity retry logic.
+        This makes AI interactions more resilient to transient network issues.
+        """
+
+        @retry(
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=1, min=2, max=60),
+            reraise=True,
+        )
+        def _execute_with_retry():
+            # super() call needs the class and instance
+            return super(RetryingAgent, self).run_sync(*args, **kwargs)
+
+        try:
+            # Log the prompt for debugging, but truncate it.
+            prompt_preview = str(args[0])[:100] if args else "N/A"
+            logging.info(f"Making AI call with prompt: '{prompt_preview}...'")
+            return _execute_with_retry()
+        except Exception as e:
+            logging.error(f"AI call failed permanently after multiple retries: {e}")
+            raise # Re-raise the exception after tenacity has given up
 
 # --- Base AI Agent ---
 
@@ -279,7 +309,7 @@ You are an expert code analyst. Your task is to summarize the provided code.
 Focus on the file's primary purpose, its key functions, classes, and their responsibilities.
 Mention any important logic or side effects. The summary should be concise and informative.
 """
-        self.summarizer_agent = Agent(
+        self.summarizer_agent = RetryingAgent(
             self._get_gemini_model("gemini-2.5-flash"),
             output_type=str,
             system_prompt=summarizer_system_prompt,
@@ -289,11 +319,10 @@ Mention any important logic or side effects. The summary should be concise and i
         self, model_name: str
     ) -> GoogleModel:
         """
-        Configures and returns a specific Gemini model instance.
+        Configures and returns a specific Gemini model instance with a timeout.
 
         Args:
             model_name: The name of the Gemini model to use (e.g., 'gemini-2.5-pro').
-            temperature: The creativity of the model, from 0.0 to 1.0.
 
         Returns:
             An instance of the configured GoogleModel.
@@ -302,6 +331,7 @@ Mention any important logic or side effects. The summary should be concise and i
         return GoogleModel(
             model_name,
             provider=GoogleProvider(api_key=self.api_key),
+            request_options={"timeout": 600},  # 10-minute timeout for AI calls
         )
 
     def get_safety_settings(self) -> List[SafetySettingDict]:

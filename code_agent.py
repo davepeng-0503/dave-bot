@@ -14,13 +14,13 @@ import markdown
 from code_agent_models import CodeAnalysis, GeneratedCode, NewFile
 
 from pydantic import BaseModel
-from pydantic_ai import Agent
 from pydantic_ai.models.google import GoogleModelSettings
 
 from html_utils import create_code_agent_html_viewer
 from shared_agents_utils import (
     AgentTools,
     BaseAiAgent,
+    RetryingAgent,
     build_context_from_dict,
     get_git_diff,
     get_git_files,
@@ -92,7 +92,7 @@ You have access to the following tools to explore the codebase if the prompt req
         if read_file_tool:
             tools.append(read_file_tool)
 
-        task_generation_agent = Agent(
+        task_generation_agent = RetryingAgent(
             self._get_gemini_model('gemini-2.5-flash'),
             output_type=DetailedTask,
             system_prompt=system_prompt,
@@ -176,7 +176,7 @@ Please provide your analysis. Use the `git_grep_search_tool` and `read_file_tool
         if read_file_tool:
             tools.append(read_file_tool)
 
-        analysis_agent = Agent(
+        analysis_agent = RetryingAgent(
             self._get_gemini_model('gemini-2.5-flash'),
             output_type=CodeAnalysis,
             system_prompt=system_prompt,
@@ -248,7 +248,7 @@ Original content of `{file_path}`:
 
         model_name = "gemini-2.5-flash" if use_flash_model else "gemini-2.5-pro"
 
-        generation_agent = Agent(
+        generation_agent = RetryingAgent(
             self._get_gemini_model(model_name), 
             output_type=GeneratedCode, 
             system_prompt=system_prompt
