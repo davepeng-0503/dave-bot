@@ -286,7 +286,7 @@ Mention any important logic or side effects. The summary should be concise and i
         )
 
     def _get_gemini_model(
-        self, model_name: str, temperature: float = 0.2
+        self, model_name: str
     ) -> GoogleModel:
         """
         Configures and returns a specific Gemini model instance.
@@ -302,7 +302,6 @@ Mention any important logic or side effects. The summary should be concise and i
         return GoogleModel(
             model_name,
             provider=GoogleProvider(api_key=self.api_key),
-            settings={"temperature": temperature},
         )
 
     def get_safety_settings(self) -> List[SafetySettingDict]:
