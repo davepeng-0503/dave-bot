@@ -8,26 +8,35 @@ import re
 import subprocess
 import threading
 import time
+import uuid
 import webbrowser
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
-import markdown
-from code_agent_models import CodeAnalysis, GeneratedCode, NewFile
 
+import markdown
+from code_agent_models import CodeAgentRun, CodeAnalysis, GeneratedCode, NewFile
+from html_utils import create_code_agent_html_viewer
 from pydantic import BaseModel
 from pydantic_ai import Agent
 from pydantic_ai.models.google import GoogleModelSettings
-
-from html_utils import create_code_agent_html_viewer
 from shared_agents_utils import (
     AgentTools,
     BaseAiAgent,
     build_context_from_dict,
+    delete_run_state,
     get_git_diff,
     get_git_files,
+    list_saved_runs,
+    load_run_state,
     read_file_content,
+    save_run_state,
     write_file_content,
 )
-from web_server_utils import ApprovalWebServer, ApprovalHandler, find_available_port
+from web_server_utils import (
+    ApprovalHandler,
+    ApprovalWebServer,
+    find_available_port,
+)
 
 # --- Configuration ---
 MAX_REANALYSIS_RETRIES = 3
@@ -35,11 +44,13 @@ MAX_ANALYSIS_GREP_RETRIES = 3
 DEFAULT_SERVER_PORT = 8080
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
 
 
 # --- Core Logic for AI Interaction ---
+
 
 class AiCodeAgent(BaseAiAgent):
     """Handles all interactions with the Gemini AI model."""
@@ -51,11 +62,19 @@ class AiCodeAgent(BaseAiAgent):
     def _log_info(self, message: str, icon: str = "ℹ️"):
         logging.info(message)
         if self.status_queue:
-            self.status_queue.put({"status": "cli_log", "message": message, "icon": icon, "cssClass": ""})
+            self.status_queue.put(
+                {"status": "cli_log", "message": message, "icon": icon, "cssClass": ""}
+            )
 
-    def generate_detailed_task(self, prompt: str, file_list: List[str], git_grep_search_tool: Optional[Callable[..., Any]] = None, read_file_tool: Optional[Callable[..., Any]] = None) -> str:
+    def generate_detailed_task(
+        self,
+        prompt: str,
+        file_list: List[str],
+        git_grep_search_tool: Optional[Callable[..., Any]] = None,
+        read_file_tool: Optional[Callable[..., Any]] = None,
+    ) -> str:
         """Expands a user's prompt into a more detailed task for the AI agent."""
-    
+
         # The system prompt is now framed from the perspective of a UX-focused Product Manager.
         system_prompt = f"""
 You are an expert AI Product Manager with a deep understanding of User Experience (UX). Your primary role is to take a user's high-level goal and translate it into a clear, actionable, and user-centric task description for an AI engineering agent. You don't dictate implementation details; instead, you define the problem, the user value, and the desired outcome.
@@ -79,7 +98,7 @@ You have access to the following tools to explore the codebase if the prompt req
 - **Focus on the "what" and "why," not the "how."** Empower the engineering agent to determine the best implementation.
 - **Stop and Finalize**: After your final tool call, provide the complete task description as your final answer.
 """
-        
+
         # The user prompt is rephrased to present the task as a user need, reinforcing the PM persona.
         user_prompt = f"A user has expressed the following need: \"{prompt}\"\n\nPlease apply your product management and UX expertise to expand this into a detailed, user-centric task description for our engineering agent."
 
@@ -93,24 +112,36 @@ You have access to the following tools to explore the codebase if the prompt req
             tools.append(read_file_tool)
 
         task_generation_agent = Agent(
-            self._get_gemini_model('gemini-2.5-flash'),
+            self._get_gemini_model("gemini-2.5-flash"),
             output_type=DetailedTask,
             system_prompt=system_prompt,
             tools=tools,
         )
-        
+
         self._log_info(f"Generating detailed task from prompt: '{prompt}'...", icon="✨")
-        
+
         response = task_generation_agent.run_sync(
             user_prompt,
-            model_settings=GoogleModelSettings(google_safety_settings=self.get_safety_settings()),
+            model_settings=GoogleModelSettings(
+                google_safety_settings=self.get_safety_settings()
+            ),
         )
-        
+
         return response.output.task_description
 
-    def get_initial_analysis(self, task: str, file_list: List[str], app_description: str = "", feedback: Optional[str] = None, previous_plan: Optional[CodeAnalysis] = None, git_grep_search_tool: Optional[Callable[..., Any]] = None, read_file_tool: Optional[Callable[..., Any]] = None, grep_results: Optional[str] = None) -> CodeAnalysis:
+    def get_initial_analysis(
+        self,
+        task: str,
+        file_list: List[str],
+        app_description: str = "",
+        feedback: Optional[str] = None,
+        previous_plan: Optional[CodeAnalysis] = None,
+        git_grep_search_tool: Optional[Callable[..., Any]] = None,
+        read_file_tool: Optional[Callable[..., Any]] = None,
+        grep_results: Optional[str] = None,
+    ) -> CodeAnalysis:
         """Runs the agent to get the code analysis, potentially using feedback or a search tool."""
-        
+
         system_prompt = f"""
 You are an expert software developer planning a coding task. Your goal is to create a comprehensive plan to modify a codebase.
 
@@ -143,11 +174,13 @@ Project Description:
 ---"""
         if feedback:
             prompt_addition = "\n---\n"
-            prompt_addition += "IMPORTANT: This is a re-analysis. You must generate a new plan.\n"
+            prompt_addition += (
+                "IMPORTANT: This is a re-analysis. You must generate a new plan.\n"
+            )
             if previous_plan:
                 prompt_addition += f"\nHere was the previous plan you created:\n{previous_plan.model_dump_json(indent=2)}\n"
-            
-            prompt_addition += f"\nThe feedback provided is: \"{feedback}\"\n"
+
+            prompt_addition += f'\nThe feedback provided is: "{feedback}"\n'
             prompt_addition += "\nPlease create a new, complete plan that addresses the feedback. Avoid asking for more grep queries or user input unless absolutely necessary.\n---"
             system_prompt += prompt_addition
 
@@ -169,7 +202,7 @@ Now, please provide your final analysis. You should be confident enough to not r
             prompt += """
 Please provide your analysis. Use the `git_grep_search_tool` and `read_file_tool` if you need to find specific code snippets or understand file contents. If you are not confident in your plan, request more grep searches by populating `additional_grep_queries_needed`. If you are blocked by ambiguity in the task, use `user_request`.
 """
-        
+
         tools: List[Callable[..., Any]] = []
         if git_grep_search_tool:
             tools.append(git_grep_search_tool)
@@ -177,12 +210,12 @@ Please provide your analysis. Use the `git_grep_search_tool` and `read_file_tool
             tools.append(read_file_tool)
 
         analysis_agent = Agent(
-            self._get_gemini_model('gemini-2.5-flash'),
+            self._get_gemini_model("gemini-2.5-flash"),
             output_type=CodeAnalysis,
             system_prompt=system_prompt,
-            tools=tools
+            tools=tools,
         )
-        
+
         log_message = "Conducting initial codebase analysis..."
         icon = "🤖"
         if feedback:
@@ -193,17 +226,30 @@ Please provide your analysis. Use the `git_grep_search_tool` and `read_file_tool
             icon = "🤔"
 
         self._log_info(log_message, icon=icon)
-        
+
         analysis = analysis_agent.run_sync(
             prompt,
-            model_settings=GoogleModelSettings(google_safety_settings=self.get_safety_settings()),
+            model_settings=GoogleModelSettings(
+                google_safety_settings=self.get_safety_settings()
+            ),
         )
         return analysis.output
 
-    def generate_file_content(self, task: str, context: str, file_path: str, all_repo_files: List[str], generation_order: List[str], edited_files: List[str], original_content: Optional[str] = None, strict: bool = True, use_flash_model: bool = False) -> GeneratedCode:
+    def generate_file_content(
+        self,
+        task: str,
+        context: str,
+        file_path: str,
+        all_repo_files: List[str],
+        generation_order: List[str],
+        edited_files: List[str],
+        original_content: Optional[str] = None,
+        strict: bool = True,
+        use_flash_model: bool = False,
+    ) -> GeneratedCode:
         """Generates the full code for a given file."""
         action = "editing" if original_content is not None else "creating"
-        
+
         system_prompt = f"""
 You are an expert programmer tasked with writing a complete Python file.
 Based on the overall task, the provided context from other relevant files, and the original code (if any),
@@ -249,27 +295,33 @@ Original content of `{file_path}`:
         model_name = "gemini-2.5-flash" if use_flash_model else "gemini-2.5-pro"
 
         generation_agent = Agent(
-            self._get_gemini_model(model_name), 
-            output_type=GeneratedCode, 
-            system_prompt=system_prompt
+            self._get_gemini_model(model_name),
+            output_type=GeneratedCode,
+            system_prompt=system_prompt,
         )
-        
-        self._log_info(f"Generating new code for {file_path} using {model_name}...", icon="💡")
+
+        self._log_info(
+            f"Generating new code for {file_path} using {model_name}...", icon="💡"
+        )
         generated_code = generation_agent.run_sync(
             prompt,
-            model_settings=GoogleModelSettings(google_safety_settings=self.get_safety_settings()),
+            model_settings=GoogleModelSettings(
+                google_safety_settings=self.get_safety_settings()
+            ),
         )
         return generated_code.output
 
 
 # --- CLI and File Operations ---
 
+
 class CliManager:
     """Manages CLI interactions, file I/O, and orchestrates the analysis and code generation."""
 
     status_queue: queue.Queue[Dict[str, Any]]
     original_branch: str
-    
+    run_state: Optional[CodeAgentRun]
+
     def __init__(self):
         """Initializes the CLI manager and the AI code agent."""
         self.args = self._parse_args()
@@ -278,21 +330,38 @@ class CliManager:
         # Pass the queue to AgentTools to capture tool usage during analysis
         self.agent_tools = AgentTools(self.args.dir, status_queue=self.status_queue)
         self.original_branch = ""
+        self.run_state = None
 
     def _log_info(self, message: str, icon: str = "ℹ️"):
         logging.info(message)
         if not self.args.force:
-            self.status_queue.put({"status": "cli_log", "message": message, "icon": icon, "cssClass": ""})
+            self.status_queue.put(
+                {"status": "cli_log", "message": message, "icon": icon, "cssClass": ""}
+            )
 
     def _log_warning(self, message: str, icon: str = "⚠️"):
         logging.warning(message)
         if not self.args.force:
-            self.status_queue.put({"status": "cli_log", "message": message, "icon": icon, "cssClass": "warning"})
+            self.status_queue.put(
+                {
+                    "status": "cli_log",
+                    "message": message,
+                    "icon": icon,
+                    "cssClass": "warning",
+                }
+            )
 
     def _log_error(self, message: str, icon: str = "❌"):
         logging.error(message)
         if not self.args.force:
-            self.status_queue.put({"status": "cli_log", "message": message, "icon": icon, "cssClass": "error"})
+            self.status_queue.put(
+                {
+                    "status": "cli_log",
+                    "message": message,
+                    "icon": icon,
+                    "cssClass": "error",
+                }
+            )
 
     def _parse_args(self) -> argparse.Namespace:
         """Parses command-line arguments."""
@@ -303,25 +372,39 @@ class CliManager:
             "--task", type=str, required=True, help="The task description for the AI."
         )
         parser.add_argument(
-            "--dir", type=str, default=os.getcwd(), help="The directory of the git repository."
+            "--dir",
+            type=str,
+            default=os.getcwd(),
+            help="The directory of the git repository.",
         )
         parser.add_argument(
-            "--app-description", type=str, default="app_description.txt",
-            help="Path to a text file describing the app's purpose."
+            "--app-description",
+            type=str,
+            default="app_description.txt",
+            help="Path to a text file describing the app's purpose.",
         )
         parser.add_argument(
-            "--force", action="store_true",
-            help="Bypass confirmation before overwriting files."
+            "--force",
+            action="store_true",
+            help="Bypass confirmation before overwriting files.",
         )
         parser.add_argument(
-            '--strict', dest='strict', action='store_true', help="Restrict AI to task-focused changes."
+            "--strict",
+            dest="strict",
+            action="store_true",
+            help="Restrict AI to task-focused changes.",
         )
         parser.add_argument(
-            '--no-strict', dest='strict', action='store_false', help="Allow AI to make broader improvements."
+            "--no-strict",
+            dest="strict",
+            action="store_false",
+            help="Allow AI to make broader improvements.",
         )
         parser.add_argument(
-            "--port", type=int, default=DEFAULT_SERVER_PORT,
-            help=f"The port to run the local web server on for user approval (default: {DEFAULT_SERVER_PORT})."
+            "--port",
+            type=int,
+            default=DEFAULT_SERVER_PORT,
+            help=f"The port to run the local web server on for user approval (default: {DEFAULT_SERVER_PORT}).",
         )
         parser.set_defaults(strict=True)
         return parser.parse_args()
@@ -332,7 +415,10 @@ class CliManager:
         try:
             untracked_result = subprocess.run(
                 ["git", "ls-files", "--others", "--exclude-standard"],
-                cwd=self.args.dir, capture_output=True, text=True, check=False,
+                cwd=self.args.dir,
+                capture_output=True,
+                text=True,
+                check=False,
             )
             if untracked_result.returncode == 0 and untracked_result.stdout:
                 untracked_files = untracked_result.stdout.strip().split("\n")
@@ -340,10 +426,14 @@ class CliManager:
                 return sorted(list(set(git_files + untracked_files)))
             return git_files
         except Exception as e:
-            self._log_warning(f"Could not get untracked git files: {e}. Proceeding with tracked files only.")
+            self._log_warning(
+                f"Could not get untracked git files: {e}. Proceeding with tracked files only."
+            )
             return git_files
 
-    def _reconcile_and_validate_analysis(self, analysis: CodeAnalysis, all_repo_files: List[str]) -> bool:
+    def _reconcile_and_validate_analysis(
+        self, analysis: CodeAnalysis, all_repo_files: List[str]
+    ) -> bool:
         """
         Validates and reconciles the AI's plan. It treats `generation_order` as the source of truth
         and adjusts `files_to_edit` and `files_to_create` to match it, ensuring consistency.
@@ -352,17 +442,21 @@ class CliManager:
             self._log_error("Cannot validate a null analysis.")
             return False
 
-        planned_files: Set[str] = set(analysis.files_to_edit) | {f.file_path for f in analysis.files_to_create}
+        planned_files: Set[str] = set(analysis.files_to_edit) | {
+            f.file_path for f in analysis.files_to_create
+        }
         ordered_files: Set[str] = set(analysis.generation_order)
 
         if planned_files == ordered_files:
             return True  # No mismatch, nothing to do.
 
-        self._log_warning("Mismatch found between planned files and generation order. Reconciling lists using 'generation_order' as the source of truth.")
+        self._log_warning(
+            "Mismatch found between planned files and generation order. Reconciling lists using 'generation_order' as the source of truth."
+        )
 
         new_files_to_edit: List[str] = []
         new_files_to_create: List[NewFile] = []
-        
+
         # Keep existing NewFile objects if they are in the generation order
         existing_creations = {f.file_path: f for f in analysis.files_to_create}
 
@@ -379,36 +473,52 @@ class CliManager:
                     new_files_to_create.append(existing_creations[file_path])
                 else:
                     # Create a placeholder NewFile object
-                    self._log_warning(f"File '{file_path}' from generation_order was not in files_to_create. Adding it.")
-                    new_files_to_create.append(NewFile(
-                        file_path=file_path,
-                        reasoning="File was added to the plan to match the generation order."
-                    ))
-        
+                    self._log_warning(
+                        f"File '{file_path}' from generation_order was not in files_to_create. Adding it."
+                    )
+                    new_files_to_create.append(
+                        NewFile(
+                            file_path=file_path,
+                            reasoning="File was added to the plan to match the generation order.",
+                        )
+                    )
+
         # Log what was removed from the original plan
         for file_path in planned_files - ordered_files:
-            self._log_warning(f"File '{file_path}' was in the original plan but not in generation_order. Removing it.")
+            self._log_warning(
+                f"File '{file_path}' was in the original plan but not in generation_order. Removing it."
+            )
 
         analysis.files_to_edit = sorted(new_files_to_edit)
         analysis.files_to_create = sorted(new_files_to_create, key=lambda f: f.file_path)
-        
+
         self._log_info("Analysis plan reconciled successfully.", icon="✅")
         return True
 
     def _create_and_checkout_branch(self, branch_name: str) -> bool:
         """Creates and checks out a new git branch."""
         try:
-            self._log_info(f"Creating and switching to new branch: {branch_name}", icon="🌿")
+            self._log_info(
+                f"Creating and switching to new branch: {branch_name}", icon="🌿"
+            )
             # Check if branch already exists
             check_branch_cmd = ["git", "rev-parse", "--verify", branch_name]
-            branch_exists = subprocess.run(check_branch_cmd, cwd=self.args.dir, capture_output=True, text=True).returncode == 0
-            
+            branch_exists = (
+                subprocess.run(
+                    check_branch_cmd,
+                    cwd=self.args.dir,
+                    capture_output=True,
+                    text=True,
+                ).returncode
+                == 0
+            )
+
             if branch_exists:
                 self._log_warning(f"Branch '{branch_name}' already exists. Checking it out.")
                 command = ["git", "checkout", branch_name]
             else:
                 command = ["git", "checkout", "-b", branch_name]
-                
+
             subprocess.run(
                 command,
                 cwd=self.args.dir,
@@ -420,13 +530,19 @@ class CliManager:
             self._log_info(f"Switched to branch '{branch_name}'.", icon="✅")
             return True
         except subprocess.CalledProcessError as e:
-            self._log_error(f"Failed to create or checkout branch '{branch_name}': {e.stderr}")
+            self._log_error(
+                f"Failed to create or checkout branch '{branch_name}': {e.stderr}"
+            )
             return False
         except FileNotFoundError:
-            self._log_error("'git' command not found. Is Git installed and in your PATH?")
+            self._log_error(
+                "'git' command not found. Is Git installed and in your PATH?"
+            )
             return False
 
-    def _commit_and_push_changes(self, branch_name: str, commit_message: str) -> Optional[str]:
+    def _commit_and_push_changes(
+        self, branch_name: str, commit_message: str
+    ) -> Optional[str]:
         """
         Adds all changes, commits them, and pushes the branch to origin.
         Returns the pull request URL if found in the output, or an empty string if push was successful but no URL was found.
@@ -437,7 +553,9 @@ class CliManager:
             subprocess.run(["git", "add", "."], cwd=self.args.dir, check=True)
 
             self._log_info(f"Committing changes with message: '{commit_message}'", icon="📝")
-            subprocess.run(["git", "commit", "-m", commit_message], cwd=self.args.dir, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", commit_message], cwd=self.args.dir, check=True
+            )
 
             self._log_info(f"Pushing branch '{branch_name}' to origin...", icon="🚀")
             push_result = subprocess.run(
@@ -454,46 +572,58 @@ class CliManager:
             self._log_info(f"Git push output:\n{full_output.strip()}")
 
             # Try to find the PR URL in the output (usually in stderr)
-            url_pattern = re.compile(r'https?://[^\s]+')
+            url_pattern = re.compile(r"https?://[^\s]+")
             if push_result.stderr:
-                for line in push_result.stderr.split('\n'):
-                    if 'remote:' in line and ('pull/new' in line or 'pull-request' in line):
+                for line in push_result.stderr.split("\n"):
+                    if "remote:" in line and ("pull/new" in line or "pull-request" in line):
                         match = url_pattern.search(line)
                         if match:
                             url = match.group(0)
                             self._log_info(f"Found pull request creation link: {url}", icon="🔗")
                             return url
-            
+
             self._log_info("Changes committed and pushed successfully.", icon="✅")
-            return "" # Push successful, but no URL found.
+            return ""  # Push successful, but no URL found.
         except subprocess.CalledProcessError as e:
             self._log_error(f"Git operation failed: {e.stderr}")
             if e.stdout:
                 self._log_error(f"Git stdout: {e.stdout}")
-            return None # Push failed
+            return None  # Push failed
         except FileNotFoundError:
             self._log_error("'git' command not found.")
-            return None # Push failed
+            return None  # Push failed
 
     def _create_pull_request(self, branch_name: str, title: str, body: str) -> bool:
         """Creates a pull request using the GitHub CLI 'gh' and opens it in the browser."""
         try:
-            subprocess.run(["gh", "--version"], check=True, capture_output=True, text=True)
+            subprocess.run(
+                ["gh", "--version"], check=True, capture_output=True, text=True
+            )
         except (FileNotFoundError, subprocess.CalledProcessError):
-            self._log_warning("'gh' command not found or not configured. Cannot create pull request.")
-            self._log_warning(f"Please create the pull request manually for branch '{branch_name}'.")
+            self._log_warning(
+                "'gh' command not found or not configured. Cannot create pull request."
+            )
+            self._log_warning(
+                f"Please create the pull request manually for branch '{branch_name}'."
+            )
             return False
 
         try:
             self._log_info(f"Creating pull request for branch '{branch_name}'...", icon="📦")
             command = [
-                "gh", "pr", "create",
-                "--title", title,
-                "--body", body,
-                "--base", self.original_branch,
-                "--head", branch_name,
+                "gh",
+                "pr",
+                "create",
+                "--title",
+                title,
+                "--body",
+                body,
+                "--base",
+                self.original_branch,
+                "--head",
+                branch_name,
             ]
-            
+
             result = subprocess.run(
                 command,
                 cwd=self.args.dir,
@@ -509,151 +639,178 @@ class CliManager:
             return True
         except subprocess.CalledProcessError as e:
             if "a pull request for" in e.stderr and "already exists" in e.stderr:
-                self._log_warning(f"A pull request for branch '{branch_name}' already exists.")
+                self._log_warning(
+                    f"A pull request for branch '{branch_name}' already exists."
+                )
                 try:
                     # Check for an existing open PR
-                    pr_list_cmd = ["gh", "pr", "list", "--head", branch_name, "--json", "url", "--state", "open"]
-                    pr_list_result = subprocess.run(pr_list_cmd, cwd=self.args.dir, capture_output=True, text=True, check=True)
+                    pr_list_cmd = [
+                        "gh",
+                        "pr",
+                        "list",
+                        "--head",
+                        branch_name,
+                        "--json",
+                        "url",
+                        "--state",
+                        "open",
+                    ]
+                    pr_list_result = subprocess.run(
+                        pr_list_cmd,
+                        cwd=self.args.dir,
+                        capture_output=True,
+                        text=True,
+                        check=True,
+                    )
                     pr_info = json.loads(pr_list_result.stdout)
                     if pr_info:
-                        pr_url = pr_info[0]['url']
+                        pr_url = pr_info[0]["url"]
                         self._log_info(f"Opening existing PR: {pr_url}", icon="🌐")
                         webbrowser.open(pr_url)
                     else:
-                        self._log_warning("Could not find an open PR for this branch to open.")
+                        self._log_warning(
+                            "Could not find an open PR for this branch to open."
+                        )
                 except Exception as find_e:
-                    self._log_warning(f"Could not retrieve or open existing PR URL: {find_e}")
+                    self._log_warning(
+                        f"Could not retrieve or open existing PR URL: {find_e}"
+                    )
                 return True
-            
+
             self._log_error(f"Failed to create pull request: {e.stderr}")
             return False
 
-    def _execute_generation_loop(self, analysis: CodeAnalysis, all_repo_files: List[str], app_desc_content: str) -> List[str]:
+    def _execute_generation_loop(
+        self, run_state: CodeAgentRun, all_repo_files: List[str], app_desc_content: str
+    ) -> List[str]:
         """
-        Manages the iterative process of generating code, handling context, and re-analyzing on failure.
+        Manages the iterative process of generating code, handling context, and saving progress.
         Returns a list of files that were not successfully processed.
         """
-        files_to_process = list(analysis.generation_order)
-        context_data: Dict[str, str] = {}
-        feedback_for_reanalysis = ""
-        retries = 0
-        edited_files: List[str] = []
+        analysis = run_state.analysis
+        files_to_process = [
+            f for f in analysis.generation_order if f not in run_state.completed_files
+        ]
+        context_data: Dict[str, str] = dict(run_state.generated_code_cache)
+        edited_files: List[str] = list(run_state.completed_files)
 
-        while files_to_process and retries <= MAX_REANALYSIS_RETRIES:
-            if feedback_for_reanalysis:
-                self._log_info("--- Re-running Analysis with Feedback ---", icon="🔁")
-                analysis = self.ai_agent.get_initial_analysis(
-                    self.args.task, all_repo_files, app_desc_content, feedback=feedback_for_reanalysis, previous_plan=analysis, git_grep_search_tool=self.agent_tools.git_grep_search, read_file_tool=self.agent_tools.read_file
-                )
-                files_to_process = list(analysis.generation_order)
-                feedback_for_reanalysis = ""  # Reset feedback
+        # Pre-load context for all relevant files if not already cached
+        files_for_context = list(set(analysis.relevant_files + analysis.files_to_edit))
+        for fp in files_for_context:
+            if fp not in context_data:
+                content = read_file_content(self.args.dir, fp)
+                if content is not None:
+                    context_data[fp] = content
 
-            # Pre-load context for the current batch of files
-            files_for_context = list(set(analysis.relevant_files + analysis.files_to_edit))
-            for fp in files_for_context:
-                if fp not in context_data:  # Only load if not already in memory
-                    content = read_file_content(self.args.dir, fp)
-                    if content is not None:
-                        context_data[fp] = content
-            
-            processed_in_loop: List[str] = []
-            reanalysis_needed = False
+        i = 0
+        while i < len(files_to_process):
+            file_path = files_to_process[i]
+            i += 1
 
-            # Use an index-based loop to allow modification of files_to_process during iteration
-            i = 0
-            while i < len(files_to_process):
-                file_path = files_to_process[i]
-                i += 1 # Increment early, so we can `continue` or `break`
-
-                self.status_queue.put({
+            self.status_queue.put(
+                {
                     "status": "writing",
                     "file_path": file_path,
                     "completed_files": edited_files,
-                    "processing_queue": files_to_process[i-1:],
-                })
+                    "processing_queue": files_to_process[i - 1 :],
+                }
+            )
 
-                remaining_order = files_to_process[i:]
-                context_str = build_context_from_dict(context_data, self.ai_agent.summarize_code, exclude_file=file_path)
-                
-                generated_code = self.ai_agent.generate_file_content(
-                    self.args.task, context_str, file_path, all_repo_files,
-                    remaining_order, edited_files, context_data.get(file_path), strict=self.args.strict,
-                    use_flash_model=analysis.use_flash_model
+            remaining_order = files_to_process[i:]
+            context_str = build_context_from_dict(
+                context_data, self.ai_agent.summarize_code, exclude_file=file_path
+            )
+
+            generated_code = self.ai_agent.generate_file_content(
+                run_state.task,
+                context_str,
+                file_path,
+                all_repo_files,
+                remaining_order,
+                edited_files,
+                context_data.get(file_path),
+                strict=self.args.strict,
+                use_flash_model=analysis.use_flash_model,
+            )
+
+            if generated_code.requires_more_context:
+                self._log_error(
+                    f"Generator needs more context for {file_path}: {generated_code.context_request}"
                 )
+                self._log_error(
+                    "Automatic re-analysis is not supported during generation. Please restart and provide better initial context."
+                )
+                # To prevent infinite loops, we stop here if context is required.
+                return files_to_process[i-1:]
 
-                if generated_code.requires_more_context:
-                    self._log_warning(f"Generator needs more context for {file_path}: {generated_code.context_request}")
-                    feedback_for_reanalysis = generated_code.context_request
-                    retries += 1
-                    reanalysis_needed = True
-                    break  # Break inner loop to re-run analysis
 
-                # Success case
-                git_diff = get_git_diff(self.args.dir, file_path, generated_code.code)
-                write_file_content(self.args.dir, file_path, generated_code.code)
+            # Success case
+            git_diff = get_git_diff(self.args.dir, file_path, generated_code.code)
+            write_file_content(self.args.dir, file_path, generated_code.code)
+            
+            # Update state after successful write
+            if file_path not in edited_files:
+                edited_files.append(file_path)
+            context_data[file_path] = generated_code.code
+            
+            run_state.completed_files = edited_files
+            run_state.generated_code_cache[file_path] = generated_code.code
+            run_state.last_update_time = datetime.now(timezone.utc).isoformat()
+            save_run_state(self.args.dir, run_state)
 
-                completed_files_so_far = edited_files + [file_path]
-
-                self.status_queue.put({
+            self.status_queue.put(
+                {
                     "status": "done",
                     "file_path": file_path,
                     "summary": markdown.markdown(generated_code.summary),
                     "reasoning": markdown.markdown(generated_code.reasoning),
                     "git_diff": git_diff,
-                    "completed_files": completed_files_so_far,
+                    "completed_files": edited_files,
                     "processing_queue": files_to_process[i:],
-                })
+                }
+            )
 
-                context_data[file_path] = generated_code.code  # Update context for next file in this loop
-                processed_in_loop.append(file_path)
-                if file_path not in edited_files:
-                    edited_files.append(file_path)
+            if generated_code.needed_context_for_future_files:
+                self._log_info(
+                    f"Agent requested more context for future steps: {generated_code.needed_context_for_future_files}"
+                )
+                for new_context_file in generated_code.needed_context_for_future_files:
+                    if new_context_file not in context_data:
+                        content = read_file_content(self.args.dir, new_context_file)
+                        if content:
+                            context_data[new_context_file] = content
 
-                # Dynamically load more context if requested for future files
-                if generated_code.needed_context_for_future_files:
-                    self._log_info(f"Agent requested more context for future steps: {generated_code.needed_context_for_future_files}")
-                    for new_context_file in generated_code.needed_context_for_future_files:
-                        if new_context_file not in context_data:
-                            content = read_file_content(self.args.dir, new_context_file)
-                            if content:
-                                context_data[new_context_file] = content
-                
-                # Dynamically add files to the generation queue
-                if generated_code.add_to_generation_queue:
-                    files_to_add = generated_code.add_to_generation_queue
-                    files_to_add = [f for f in files_to_add if f not in files_to_process]
-                    self._log_info(f"Agent requested to add {len(files_to_add)} file(s) to the generation queue: {files_to_add}")
-                    
-                    # Add new files to the end of the processing list and master plan
+            if generated_code.add_to_generation_queue:
+                files_to_add = [
+                    f for f in generated_code.add_to_generation_queue if f not in files_to_process and f not in edited_files
+                ]
+                if files_to_add:
+                    self._log_info(
+                        f"Agent requested to add {len(files_to_add)} file(s) to the generation queue: {files_to_add}"
+                    )
                     files_to_process.extend(files_to_add)
                     analysis.generation_order.extend(files_to_add)
-                    
-                    self.status_queue.put({
-                        "status": "plan_updated",
-                        "files_added": files_to_add,
-                        "new_total_files": len(analysis.generation_order)
-                    })
+                    run_state.analysis = analysis # Update analysis in state
+                    save_run_state(self.args.dir, run_state)
 
-            # Update the list of files to process for the next iteration
-            # This logic is now tricky because we used an index-based loop.
-            # If reanalysis was needed, we need to figure out the remaining files.
-            if reanalysis_needed:
-                # The files from `i` onwards are the ones not yet processed in this attempt.
-                files_to_process = files_to_process[i-1:]
-            else:
-                # The loop completed successfully
-                files_to_process = []
+                    self.status_queue.put(
+                        {
+                            "status": "plan_updated",
+                            "files_added": files_to_add,
+                            "new_total_files": len(analysis.generation_order),
+                        }
+                    )
 
-            if not reanalysis_needed:
-                break  # Exit while loop if all files processed successfully
-
-        return files_to_process
+        # If we get here, all files were processed.
+        return []
 
     def _report_final_status(self, unprocessed_files: List[str]):
         """Prints the final status of the code generation task."""
         if unprocessed_files:
-            self._log_error(f"Failed to complete the task after {MAX_REANALYSIS_RETRIES} retries.")
-            self._log_error("The following files were not processed:")
+            self._log_error(f"Failed to complete the task.")
+            self._log_error(
+                "The following files were not processed (see errors above):"
+            )
             for file_path in unprocessed_files:
                 self._log_error(f"  - {file_path}")
         else:
@@ -665,345 +822,304 @@ class CliManager:
         try:
             original_branch_result = subprocess.run(
                 ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                cwd=self.args.dir, capture_output=True, text=True, check=True, encoding="utf-8"
+                cwd=self.args.dir,
+                capture_output=True,
+                text=True,
+                check=True,
+                encoding="utf-8",
             )
             self.original_branch = original_branch_result.stdout.strip()
-            self._log_info(f"Original branch is '{self.original_branch}'. This will be the base for the pull request.")
+            self._log_info(
+                f"Original branch is '{self.original_branch}'. This will be the base for the pull request."
+            )
         except (subprocess.CalledProcessError, FileNotFoundError) as e:
             self._log_error(f"Could not determine the current git branch: {e}. Aborting.")
             return
 
-        app_desc_content = read_file_content(self.args.dir, self.args.app_description) or ""
+        app_desc_content = (
+            read_file_content(self.args.dir, self.args.app_description) or ""
+        )
         all_repo_files = self._get_all_repository_files()
         if not all_repo_files:
             self._log_error("No tracked or untracked files found. Exiting.")
             return
 
-        # 2. Start Web Server and open browser
+        # 2. Start Web Server
         server = None
+        viewer_path = None
         if not self.args.force:
-            # Find an available port, starting from the one specified.
             actual_port = find_available_port(self.args.port)
             if actual_port is None:
-                self._log_error(f"Could not find an available port starting from {self.args.port}. Aborting.")
+                self._log_error(
+                    f"Could not find an available port starting from {self.args.port}. Aborting."
+                )
                 return
-            
-            if actual_port != self.args.port:
-                self._log_info(f"Port {self.args.port} was in use. Switched to port {actual_port}.", icon="🔌")
+
+            saved_runs = list_saved_runs(self.args.dir)
+            viewer_path = create_code_agent_html_viewer(actual_port, all_repo_files, saved_runs)
+            if not viewer_path:
+                self._log_error("Failed to create the HTML viewer file. Aborting.")
+                return
 
             class StatusAwareApprovalHandler(ApprovalHandler):
                 cli_manager = self
                 def do_GET(self):
-                    if self.path == '/status':
+                    if self.path == "/status":
                         try:
-                            # Use a long poll timeout on the server side
                             update = self.cli_manager.status_queue.get(block=True, timeout=28)
-                            self._send_response(200, 'application/json', json.dumps(update).encode('utf-8'))
-                        except (queue.Empty, AttributeError):
-                            # Send 204 No Content if queue is empty after timeout
-                            self._send_response(204, 'text/plain', b'')
+                            self._send_response(200, "application/json", json.dumps(update).encode("utf-8"))
+                        except queue.Empty:
+                            self._send_response(204, "text/plain", b"")
                     else:
-                        # Serve the main HTML file for other paths
                         super().do_GET()
                 
                 def do_POST(self):
-                    """Handles POST requests for user actions, including new task-related actions."""
-                    if self.path in ["/approve", "/reject", "/feedback", "/user_input", "/generate_task", "/start_analysis"]:
-                        content_length = int(self.headers.get("Content-Length", 0))
-                        post_data = self.rfile.read(content_length)
+                    # This now handles resume and delete as well.
+                    super().do_POST()
 
-                        action = self.path.lstrip("/")
-                        data: Optional[Any] = None
-
-                        if post_data:
-                            try:
-                                data = json.loads(post_data)
-                            except json.JSONDecodeError:
-                                self._send_response(400, "text/plain", b"Invalid JSON")
-                                return
-
-                        self.server.set_decision(action, data)
-
-                        success_message = (
-                            f"Decision '{action}' received. You can close this window."
-                        )
-                        self._send_response(
-                            200,
-                            "text/html",
-                            f"<html><body><p>{success_message}</p><script>window.close();</script></body></html>".encode(
-                                "utf-8"
-                            ),
-                        )
-                    else:
-                        self._send_response(404, "text/plain", b"Not Found")
-
-            def start_server(port: int=actual_port, retries: int=0) -> Tuple[ApprovalWebServer, str | None]:
-                server = None
-                try:
-                    viewer_html_path = create_code_agent_html_viewer(port, all_repo_files)
-                    if not viewer_html_path:
-                        raise RuntimeError("Failed to create HTML viewer file.")
-                    server = ApprovalWebServer(('', port), StatusAwareApprovalHandler, html_file_path=os.path.realpath(viewer_html_path))
-                    server_thread = threading.Thread(target=server.serve_forever)
-                    server_thread.daemon = True
-                    server_thread.start()
-                    self._log_info(f"Interactive viewer is running on http://localhost:{port}. Opening in your browser...", icon="🌐")
-                    return server, viewer_html_path 
-                except OSError as e:
-                    self._log_error(f"Failed to start web server on port {port}: {e}")
-                    if server:
-                        server.shutdown()
-                        server.server_close()
-                    if retries < 15:
-                        return start_server(port + 1, retries + 1)
-                    else: 
-                        raise RuntimeError("Could not start server after multiple attempts.")
-                    
-
-            server, viewer_path = start_server(actual_port)
-            if viewer_path:
-                print(f"Interactive viewer is running on http://localhost:{actual_port}. Opening in your browser...")
-                webbrowser.open(f"file://{os.path.realpath(viewer_path)}")
-            
+            server = ApprovalWebServer(("", actual_port), StatusAwareApprovalHandler, html_file_path=viewer_path)
+            server_thread = threading.Thread(target=server.serve_forever)
+            server_thread.daemon = True
+            server_thread.start()
+            self._log_info(f"Interactive viewer is running on http://localhost:{actual_port}. Opening in your browser...", icon="🌐")
+            webbrowser.open(f"http://localhost:{actual_port}")
         else:
             self._log_info("Running in non-interactive mode due to --force flag.")
 
-        analysis: Optional[CodeAnalysis] = None
         try:
-            # 3. Task Definition Step (if interactive)
-            if not self.args.force and server:
-                self.status_queue.put({"status": "awaiting_task", "initial_task": self.args.task})
-                
-                while True: # Loop for task definition phase
+            # 3. Startup: New, Resume, or Delete
+            if server and not self.args.force:
+                # If there are saved runs, the UI starts at the selection screen.
+                # If not, it starts at the "initializing" screen and JS immediately polls, getting 'awaiting_task'.
+                if not saved_runs:
+                    self.status_queue.put({"status": "awaiting_task", "initial_task": self.args.task})
+
+                while True: # Loop to handle run selection/definition
                     decision, data = server.wait_for_decision()
-                    
-                    if decision == 'generate_task':
-                        prompt = data.get('prompt') if isinstance(data, dict) else ''
-                        if prompt:
-                            generated_task = self.ai_agent.generate_detailed_task(
-                                prompt,
-                                file_list=all_repo_files,
-                                git_grep_search_tool=self.agent_tools.git_grep_search,
-                                read_file_tool=self.agent_tools.read_file
-                            )
-                            self.status_queue.put({"status": "task_generated", "task": generated_task})
+                    run_id = data.get("run_id") if isinstance(data, dict) else None
+
+                    if decision == "resume_run" and run_id:
+                        self.run_state = load_run_state(self.args.dir, run_id)
+                        if self.run_state:
+                            self.args.task = self.run_state.task
+                            self._log_info(f"Resuming run '{run_id}' for task: {self.args.task}", icon="🔄")
+                            server.reset_decision()
+                            break # Move to generation
                         else:
-                            self._log_warning("Received generate_task request with no prompt.")
-                        server.reset_decision()
-                        continue # Wait for next action
-                    
-                    elif decision == 'start_analysis':
-                        final_task = data.get('task') if isinstance(data, dict) else self.args.task
-                        if not final_task:
-                            self._log_error("Cannot start analysis with an empty task.")
-                            self.status_queue.put({"status": "error", "message": "Cannot start analysis with an empty task."})
-                            return
-                        
-                        self.args.task = final_task # Update task with the final version from UI
-                        self._log_info(f"Starting analysis with final task: '{self.args.task}'", icon="🚀")
-                        server.reset_decision()
-                        break # Exit task definition loop and proceed to analysis
-                    
-                    else: # Handle unexpected decisions or user closing the tab
-                        self._log_error(f"Aborted during task definition. Decision: '{decision}'.")
-                        if server: self.status_queue.put({"status": "error", "message": f"Operation cancelled during task definition. Decision: {decision}"})
-                        return
-
-            # 4. Analysis and Confirmation Loop
-            previous_analysis: Optional[CodeAnalysis] = None
-            user_feedback: Optional[str] = None
-            feedback_loop = 0
-            while True:  # This loop handles user feedback on the plan
-                # A. Get Analysis
-                if user_feedback:
-                    analysis = self.ai_agent.get_initial_analysis(
-                        self.args.task, all_repo_files, app_desc_content,
-                        feedback=user_feedback, previous_plan=previous_analysis,
-                        git_grep_search_tool=self.agent_tools.git_grep_search,
-                        read_file_tool=self.agent_tools.read_file
-                    )
-                    user_feedback = None
-                else:
-                    grep_results = ""
-                    analysis_retries = 0
-                    while analysis_retries < MAX_ANALYSIS_GREP_RETRIES:
-                        current_analysis = self.ai_agent.get_initial_analysis(
-                            self.args.task, all_repo_files, app_desc_content,
-                            git_grep_search_tool=self.agent_tools.git_grep_search,
-                            read_file_tool=self.agent_tools.read_file,
-                            grep_results=grep_results or None
-                        )
-                        if current_analysis.additional_grep_queries_needed:
-                            analysis_retries += 1
-                            self._log_info("AI has requested more information via git grep. Running queries...", icon="🤖")
-                            new_results = [self.agent_tools.git_grep_search(q) for q in current_analysis.additional_grep_queries_needed]
-                            grep_results = "\n\n".join(new_results)
-                            analysis = None
-                        else:
-                            analysis = current_analysis
-                            break
-                    if not analysis:
-                        if server:
-                            self.status_queue.put({"status": "error", "message": f"Failed to get a confident analysis after {MAX_ANALYSIS_GREP_RETRIES} attempts."})
-                        self._log_error(f"Failed to get a confident analysis after {MAX_ANALYSIS_GREP_RETRIES} attempts.")
-                        return
-
-                # B. Handle user request from AI
-                if analysis.user_request:
-                    self._log_info(f"AI is asking a question: {analysis.user_request}", icon="❓")
-                    if not self.args.force and server:
-                        self.status_queue.put({
-                            "status": "user_input_required",
-                            "request": analysis.user_request
-                        })
-                        decision, data = server.wait_for_decision()
-                        if decision == 'user_input':
-                            user_response = data.get('user_input') if isinstance(data, dict) else None
-                            if user_response:
-                                self._log_info(f"User responded: {user_response}", icon="💬")
-                                user_feedback = f"My previous question was: '{analysis.user_request}'. The user's answer is: '{user_response}'. Please create a plan based on this new information."
-                                previous_analysis = analysis
-                                feedback_loop += 1
-                                server.reset_decision()
-                                continue # Restart the main `while True` loop for re-analysis
-                            else:
-                                self._log_error("User did not provide input. Aborting.")
-                                if server: self.status_queue.put({"status": "error", "message": "User did not provide input."})
-                                return
-                        else:
-                            self._log_error(f"Expected user input, but got decision '{decision}'. Aborting.")
-                            if server: self.status_queue.put({"status": "error", "message": f"Operation cancelled during user input. Decision: {decision}"})
-                            return
-                    else: # --force is on or server not running
-                        self._log_error("AI requested user input in non-interactive mode. Aborting.")
-                        return
-
-                # C. Reconcile analysis
-                if not self._reconcile_and_validate_analysis(analysis, all_repo_files):
-                    if server:
-                        self.status_queue.put({"status": "error", "message": "Failed to reconcile the analysis plan."})
-                    self._log_error("Failed to reconcile the analysis plan. Aborting.")
-                    return
-                
-                if not analysis.generation_order:
-                    self._log_info("AI analysis resulted in no files to change. Exiting.")
-                    if server:
-                        self.status_queue.put({"status": "finished", "message": "AI analysis resulted in no files to change."})
-                    return
-
-                # D. User Confirmation
-                if not self.args.force and server:
-                    self._log_info("Analysis complete. Awaiting user confirmation in browser.", icon="✅")
-                    
-                    # Convert markdown fields to HTML for the view
-                    analysis_for_view = analysis.model_copy(deep=True)
-                    analysis_for_view.plan = [markdown.markdown(step) for step in analysis.plan]
-                    analysis_for_view.reasoning = markdown.markdown(analysis.reasoning)
-                    task = markdown.markdown(self.args.task)
-                    self.status_queue.put({
-                        "status": "plan_ready",
-                        "plan": analysis_for_view.model_dump(),
-                        "task": task
-                    })
-
-                    decision, data = server.wait_for_decision()
-
-                    if decision == 'approve':
-                        self._log_info("Plan approved by user. Proceeding with code generation.", icon="✅")
-                        if data and isinstance(data, dict):
-                            # Handle model override
-                            if 'use_flash_model' in data:
-                                override_value: bool = bool(data.get('use_flash_model', False))
-                                if analysis.use_flash_model != override_value:
-                                    analysis.use_flash_model = override_value
-                                    self._log_info(f"Model selection overridden by user. 'Use Gemini Flash' is now set to: {analysis.use_flash_model}")
-                            
-                            # Handle additional context files
-                            additional_files: List[str] = data.get('additional_context_files', [])
-                            if additional_files:
-                                self._log_info(f"User added {len(additional_files)} files to context: {additional_files}")
-                                # Add to relevant_files, avoiding duplicates
-                                analysis.relevant_files = sorted(list(set(analysis.relevant_files + additional_files)))
-                        
-                        if not self._create_and_checkout_branch(analysis.branch_name):
-                            self.status_queue.put({"status": "error", "message": "Could not create git branch."})
-                            self._log_error("Could not create git branch. Aborting.")
-                            return
-                        break # Exit feedback loop
-                    elif decision == 'reject':
-                        self._log_info("Plan rejected by user. Operation cancelled.", icon="❌")
-                        return
-                    elif decision == 'feedback':
-                        if data and isinstance(data, dict):
-                            user_feedback = data.get('feedback')
-                            additional_files = data.get('additional_context_files', [])
-                            if additional_files:
-                                self._log_info(f"User added {len(additional_files)} files to context for re-analysis: {additional_files}")
-                                analysis.relevant_files = sorted(list(set(analysis.relevant_files + additional_files)))
-                        else:
-                            # Fallback for older JS or unexpected data format
-                            user_feedback = data if isinstance(data, str) else None
-
-                        if not user_feedback:
-                            self._log_warning("Feedback submitted without text. Ignoring and awaiting new decision.")
+                            self._log_error(f"Could not load saved run {run_id}.")
                             server.reset_decision()
                             continue
-                        
-                        previous_analysis = analysis
-                        feedback_loop += 1
-                        # The get_initial_analysis call will log the re-analysis message.
-                        decision = None
-                        data = None
+
+                    elif decision == "delete_run" and run_id:
+                        if delete_run_state(self.args.dir, run_id):
+                           self._log_info(f"Deleted saved run {run_id}.")
+                        # UI handles removal. Just wait for the next user action.
                         server.reset_decision()
                         continue
-                    else:
-                        self._log_error("No decision received from the browser. Exiting.")
+
+                    elif decision == "generate_task":
+                        prompt = data.get("prompt") if isinstance(data, dict) else ""
+                        if prompt:
+                            generated_task = self.ai_agent.generate_detailed_task(prompt, all_repo_files, self.agent_tools.git_grep_search, self.agent_tools.read_file)
+                            self.status_queue.put({"status": "task_generated", "task": generated_task})
+                        server.reset_decision()
+                        continue
+
+                    elif decision == "start_analysis":
+                        final_task = data.get("task") if isinstance(data, dict) else self.args.task
+                        self.args.task = final_task
+                        self._log_info(f"Starting new run for task: '{self.args.task}'", icon="🚀")
+                        server.reset_decision()
+                        break # Move to analysis
+                    
+                    elif decision is None: # User closed tab
+                        self._log_info("User closed the browser tab. Shutting down.")
                         return
-                else: # --force is on
-                    self._log_info("Plan approved automatically (--force).", icon="✅")
-                    if not self._create_and_checkout_branch(analysis.branch_name):
-                        self._log_error("Could not create git branch. Aborting.")
+
+            # If we're here, it's either a new run or a resumed run.
+            # 4. Analysis and Confirmation Loop (for new runs only)
+            if not self.run_state: # This means it's a new run
+                # Create the run state object for a new run
+                now = datetime.now(timezone.utc).isoformat()
+                self.run_state = CodeAgentRun(
+                    run_id=f"{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}",
+                    task=self.args.task,
+                    original_branch=self.original_branch,
+                    analysis=None, # To be filled
+                    start_time=now,
+                    last_update_time=now,
+                )
+
+                previous_analysis: Optional[CodeAnalysis] = None
+                user_feedback: Optional[str] = None
+                while True: # Feedback loop
+                    analysis = self._get_analysis_with_retries(all_repo_files, app_desc_content, user_feedback, previous_analysis)
+                    if not analysis: return
+                    
+                    if analysis.user_request:
+                        user_feedback, previous_analysis = self._handle_user_input_request(analysis, server)
+                        if user_feedback is None: return # Aborted
+                        continue
+                    
+                    if not self._reconcile_and_validate_analysis(analysis, all_repo_files):
+                        if server: self.status_queue.put({"status": "error", "message": "Failed to reconcile plan."})
                         return
-                    break # Exit feedback loop
+
+                    if not analysis.generation_order:
+                        self._log_info("AI analysis resulted in no files to change. Exiting.")
+                        return
+                    
+                    approved, feedback, new_analysis_obj = self._wait_for_plan_approval(analysis, server)
+                    if not approved:
+                        self._log_info("Plan rejected by user. Operation cancelled.", icon="❌")
+                        return
+
+                    if feedback:
+                        user_feedback = feedback
+                        previous_analysis = new_analysis_obj
+                        server.reset_decision()
+                        continue
+                    
+                    analysis = new_analysis_obj # Use the potentially modified analysis
+                    break # Plan approved, exit feedback loop
+                
+                self.run_state.analysis = analysis
+                if not save_run_state(self.args.dir, self.run_state):
+                    self._log_error("Could not save initial run state. Aborting.")
+                    return
+
+                if not self._create_and_checkout_branch(analysis.branch_name):
+                    self._log_error("Could not create git branch. Aborting.")
+                    delete_run_state(self.args.dir, self.run_state.run_id)
+                    return
+            
+            else: # Resuming run
+                self._log_info("Resuming run. Analysis already exists, checking out branch and starting generation.")
+                if not self._create_and_checkout_branch(self.run_state.analysis.branch_name):
+                    self._log_error("Could not checkout existing git branch. Aborting.")
+                    return
+
 
             # 5. Iterative Generation
-            unprocessed_files = self._execute_generation_loop(analysis, all_repo_files, app_desc_content)
+            unprocessed_files = self._execute_generation_loop(self.run_state, all_repo_files, app_desc_content)
             
-            # 6. Final Status
+            # 6. Final Status & Cleanup
             self._report_final_status(unprocessed_files)
 
             if not unprocessed_files:
-                self._log_info("All files processed. Proceeding with git operations.")
+                analysis = self.run_state.analysis
                 commit_message = f"feat: {self.args.task}\n\n{analysis.reasoning}"
                 push_result_url = self._commit_and_push_changes(analysis.branch_name, commit_message)
-                if push_result_url is not None:  # This means push was successful
-                    pr_title = f"AI-Gen: {analysis.branch_name}"
+                if push_result_url is not None:
+                    pr_title = f"AI-Gen: {self.args.task}"
                     pr_body = f"This PR was automatically generated by an AI agent to address the following task:\n\n**Task:** {self.args.task}\n\n**AI's Plan:**\n"
-                    for i, step in enumerate(analysis.plan):
-                        pr_body += f"{i+1}. {step}\n"
-                    # Try to create PR with gh first. _create_pull_request returns True on success.
-                    if (self._create_pull_request(analysis.branch_name, pr_title, pr_body) == False):
-                        webbrowser.open(push_result_url)
+                    pr_body += "\n".join([f"{i+1}. {step}" for i, step in enumerate(analysis.plan)])
+                    if not self._create_pull_request(analysis.branch_name, pr_title, pr_body) and push_result_url:
+                         webbrowser.open(push_result_url)
                 else:
-                    # This block is executed if push_result_url is None, which means push failed.
                     self._log_warning("Git push failed. Skipping PR creation.")
-
+                
+                # Delete the saved run state on success
+                delete_run_state(self.args.dir, self.run_state.run_id)
             else:
-                self._log_warning("Some files were not processed. Skipping git commit and PR creation.")
+                self._log_warning("Some files were not processed. Run state has been saved. Skipping git commit and PR creation.")
 
             if server and self.status_queue:
                 self.status_queue.put({"status": "finished"})
-                time.sleep(2) # Give browser time to fetch final status
+                time.sleep(2)
         finally:
             if server:
                 self._log_info("Shutting down web server.", icon="🔌")
                 server.shutdown()
                 server.server_close()
+            if viewer_path and os.path.exists(viewer_path):
+                os.remove(viewer_path)
+
+    def _get_analysis_with_retries(self, all_repo_files: List[str], app_desc_content: str, feedback: Optional[str] = None, previous_plan: Optional[CodeAnalysis] = None) -> Optional[CodeAnalysis]:
+        """Handles the loop of getting analysis and retrying with grep if needed."""
+        grep_results = ""
+        for _ in range(MAX_ANALYSIS_GREP_RETRIES):
+            analysis = self.ai_agent.get_initial_analysis(
+                self.args.task, all_repo_files, app_desc_content,
+                feedback=feedback, previous_plan=previous_plan,
+                git_grep_search_tool=self.agent_tools.git_grep_search,
+                read_file_tool=self.agent_tools.read_file,
+                grep_results=grep_results or None
+            )
+            if not analysis.additional_grep_queries_needed:
+                return analysis
+            
+            self._log_info("AI has requested more information via git grep. Running queries...", icon="🤖")
+            new_results = [self.agent_tools.git_grep_search(q) for q in analysis.additional_grep_queries_needed]
+            grep_results = "\n\n".join(new_results)
+            feedback = None # Don't resend feedback on grep retry
+        
+        self._log_error(f"Failed to get a confident analysis after {MAX_ANALYSIS_GREP_RETRIES} attempts.")
+        return None
+
+    def _handle_user_input_request(self, analysis: CodeAnalysis, server: Optional[ApprovalWebServer]) -> Tuple[Optional[str], Optional[CodeAnalysis]]:
+        """Handles the AI's request for user input."""
+        self._log_info(f"AI is asking a question: {analysis.user_request}", icon="❓")
+        if server:
+            self.status_queue.put({"status": "user_input_required", "request": analysis.user_request})
+            decision, data = server.wait_for_decision()
+            if decision == 'user_input' and isinstance(data, dict):
+                user_response = data.get('user_input')
+                if user_response:
+                    self._log_info(f"User responded: {user_response}", icon="💬")
+                    feedback = f"My previous question was: '{analysis.user_request}'. The user's answer is: '{user_response}'. Please create a plan based on this new information."
+                    server.reset_decision()
+                    return feedback, analysis
+        
+        self._log_error("Aborted during user input.")
+        if server: self.status_queue.put({"status": "error", "message": "Operation cancelled during user input."})
+        return None, None
+
+    def _wait_for_plan_approval(self, analysis: CodeAnalysis, server: Optional[ApprovalWebServer]) -> Tuple[bool, Optional[str], CodeAnalysis]:
+        """Shows the plan to the user and waits for approval, rejection, or feedback."""
+        if not server: # --force mode
+            self._log_info("Plan approved automatically (--force).", icon="✅")
+            return True, None, analysis
+
+        self._log_info("Analysis complete. Awaiting user confirmation in browser.", icon="✅")
+        analysis_for_view = analysis.model_copy(deep=True)
+        analysis_for_view.plan = [markdown.markdown(step) for step in analysis.plan]
+        analysis_for_view.reasoning = markdown.markdown(analysis.reasoning)
+        task = markdown.markdown(self.args.task)
+        self.status_queue.put({"status": "plan_ready", "plan": analysis_for_view.model_dump(), "task": task})
+
+        decision, data = server.wait_for_decision()
+
+        if decision == 'approve':
+            self._log_info("Plan approved by user.", icon="✅")
+            if isinstance(data, dict):
+                if 'use_flash_model' in data:
+                    override = bool(data.get('use_flash_model', False))
+                    if analysis.use_flash_model != override:
+                        analysis.use_flash_model = override
+                        self._log_info(f"Model selection overridden. Use Flash: {override}")
+                if 'additional_context_files' in data:
+                    added_files = data.get('additional_context_files', [])
+                    if added_files:
+                        self._log_info(f"User added {len(added_files)} files to context: {added_files}")
+                        analysis.relevant_files = sorted(list(set(analysis.relevant_files + added_files)))
+            return True, None, analysis
+        
+        if decision == 'feedback' and isinstance(data, dict):
+            feedback = data.get('feedback')
+            if feedback:
+                if 'additional_context_files' in data:
+                    added_files = data.get('additional_context_files', [])
+                    analysis.relevant_files = sorted(list(set(analysis.relevant_files + added_files)))
+                return False, feedback, analysis
+
+        return False, None, analysis
 
 
 if __name__ == "__main__":
     if os.name == "nt":
         import asyncio
+
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
     cli = CliManager()

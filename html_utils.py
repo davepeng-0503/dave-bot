@@ -11,6 +11,8 @@ import logging
 import tempfile
 from typing import List, Optional
 
+from code_agent_models import CodeAgentRun
+
 # --- Shared HTML Components ---
 
 COMMON_STYLE = """
@@ -527,12 +529,47 @@ COMMON_STYLE = """
         color: white;
         border-color: var(--primary-color);
     }
+
+    /* --- Saved Runs View --- */
+    .saved-run-item {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 1rem 1.5rem;
+        border: 1px solid var(--border-color);
+        border-radius: 8px;
+        margin-bottom: 1rem;
+        background-color: #fff;
+    }
+    .saved-run-item .run-details {
+        flex-grow: 1;
+    }
+    .saved-run-item .run-task {
+        font-weight: 500;
+        margin: 0 0 0.5rem 0;
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .saved-run-item small {
+        color: #555;
+    }
+    .saved-run-item .run-actions button {
+        margin-left: 0.5rem;
+        padding: 0.6rem 1.2rem;
+        font-size: 0.9rem;
+    }
 </style>
 """
 
 
-def create_code_agent_html_viewer(port: int, all_repo_files: List[str]) -> Optional[str]:
+def create_code_agent_html_viewer(port: int, all_repo_files: List[str], saved_runs: List[CodeAgentRun]) -> Optional[str]:
     """Generates a dynamic HTML viewer for the code agent lifecycle."""
+
+    # Serialize pydantic models to dictionaries for JSON embedding
+    saved_runs_data = [run.model_dump() for run in saved_runs]
 
     html_content = f"""
 <!DOCTYPE html>
@@ -565,6 +602,7 @@ def create_code_agent_html_viewer(port: int, all_repo_files: List[str]) -> Optio
     <script>
         const port = {port};
         const allRepoFiles = {json.dumps(all_repo_files)};
+        const initialSavedRuns = {json.dumps(saved_runs_data)};
         const mainContainer = document.getElementById('main-container');
         
         let state = {{
@@ -572,6 +610,7 @@ def create_code_agent_html_viewer(port: int, all_repo_files: List[str]) -> Optio
             initial_task: '',
             plan: null,
             status: 'initializing',
+            savedRuns: [],
             totalFiles: 0,
             timelineItemCounter: 0,
             pollingActive: false,
@@ -594,6 +633,36 @@ def create_code_agent_html_viewer(port: int, all_repo_files: List[str]) -> Optio
                         <p>Connecting to agent...</p>
                     </div>
                 </div>
+            `;
+        }}
+
+        function renderSavedRunsView() {{
+            const runsHtml = state.savedRuns.map(run => `
+                <div class="saved-run-item" id="run-${{run.run_id}}">
+                    <div class="run-details">
+                        <p class="run-task" title="${{escapeHtml(run.task)}}">${{escapeHtml(run.task)}}</p>
+                        <small>Last updated: ${{new Date(run.last_update_time).toLocaleString()}}</small>
+                    </div>
+                    <div class="run-actions">
+                        <button class="approve-btn" onclick="resumeRun('${{run.run_id}}')">Resume</button>
+                        <button class="reject-btn" onclick="deleteRun('${{run.run_id}}')">Delete</button>
+                    </div>
+                </div>
+            `).join('');
+
+            mainContainer.innerHTML = `
+            <div id="saved-runs-view" class="view active">
+                <div class="container">
+                    <h1>Resume a Previous Run</h1>
+                    <p>You have unfinished runs. You can resume one, delete it, or start a new task.</p>
+                    <div id="saved-runs-list">
+                        ${{runsHtml || '<p>No saved runs found.</p>'}}
+                    </div>
+                    <div class="actions">
+                        <button class="feedback-btn" onclick="startNewTask()">Start a New Task</button>
+                    </div>
+                </div>
+            </div>
             `;
         }}
 
@@ -954,6 +1023,11 @@ def create_code_agent_html_viewer(port: int, all_repo_files: List[str]) -> Optio
             state.status = newStatus;
 
             switch (newStatus) {{
+                case 'awaiting_selection':
+                    state.savedRuns = data.saved_runs;
+                    renderSavedRunsView();
+                    break;
+
                 case 'awaiting_task':
                     state.initial_task = data.initial_task;
                     renderTaskDefinitionView();
@@ -1123,6 +1197,56 @@ def create_code_agent_html_viewer(port: int, all_repo_files: List[str]) -> Optio
         }}
 
         // --- ACTION FUNCTIONS ---
+        function startNewTask() {{
+            renderInitializingView();
+            state.pollingActive = true;
+            pollStatus();
+            // The server will now send an 'awaiting_task' status.
+        }}
+
+        function resumeRun(runId) {{
+            renderPlanningView('Resuming run...');
+            state.pollingActive = true;
+            pollStatus();
+
+            fetch(`http://localhost:${{port}}/resume_run`, {{
+                method: 'POST',
+                headers: {{ 'Content-Type': 'application/json' }},
+                body: JSON.stringify({{ run_id: runId }})
+            }}).catch(err => {{
+                showMessage('Error', 'Could not send resume request.', true);
+                console.error('Error resuming run:', err);
+                state.pollingActive = false;
+            }});
+        }}
+
+        function deleteRun(runId) {{
+            if (!confirm('Are you sure you want to delete this saved run?')) return;
+
+            const runItem = document.getElementById(`run-${{runId}}`);
+            if (runItem) runItem.style.opacity = '0.5';
+
+            fetch(`http://localhost:${{port}}/delete_run`, {{
+                method: 'POST',
+                headers: {{ 'Content-Type': 'application/json' }},
+                body: JSON.stringify({{ run_id: runId }})
+            }}).then(res => {{
+                if (!res.ok) throw new Error('Server responded with an error');
+                // On success, update state and re-render.
+                state.savedRuns = state.savedRuns.filter(r => r.run_id !== runId);
+                if (state.savedRuns.length > 0) {{
+                    renderSavedRunsView();
+                }} else {{
+                    // Last run was deleted, transition to starting a new task.
+                    startNewTask();
+                }}
+            }}).catch(err => {{
+                alert('Error: Could not delete the saved run.');
+                if (runItem) runItem.style.opacity = '1';
+                console.error('Error deleting run:', err);
+            }});
+        }}
+
         function startAnalysis() {{
             const finalTask = document.getElementById('final-task-input').value;
             if (!finalTask) {{
@@ -1132,6 +1256,8 @@ def create_code_agent_html_viewer(port: int, all_repo_files: List[str]) -> Optio
             
             state.task = finalTask; // Store the final task in state
             renderPlanningView(`Analyzing your request...`);
+            state.pollingActive = true;
+            pollStatus();
 
             const payload = {{ task: finalTask }};
 
@@ -1259,9 +1385,19 @@ def create_code_agent_html_viewer(port: int, all_repo_files: List[str]) -> Optio
 
         // INITIALIZATION
         document.addEventListener('DOMContentLoaded', () => {{
-            renderInitializingView();
-            state.pollingActive = true;
-            pollStatus();
+            state.savedRuns = initialSavedRuns;
+            if (state.savedRuns && state.savedRuns.length > 0) {{
+                renderSavedRunsView();
+                // We don't poll here. We wait for user to select an action
+                // which will trigger a POST request. The server will then
+                // unblock and the main agent logic will proceed, which
+                // will start putting status updates on the queue.
+                // Functions like resumeRun and startNewTask will enable polling.
+            }} else {{
+                renderInitializingView();
+                state.pollingActive = true;
+                pollStatus();
+            }}
         }});
     </script>
 </body>

@@ -4,7 +4,9 @@ Utilities shared across different AI agents, including file operations,
 base AI agent configuration, and context management.
 """
 import difflib
+import glob
 import hashlib
+import json
 import logging
 import os
 import queue
@@ -13,14 +15,18 @@ from typing import Any, Callable, Dict, List, Optional
 
 from dotenv import load_dotenv
 from google.genai.types import HarmBlockThreshold, HarmCategory, SafetySettingDict
+from pydantic import ValidationError
 from pydantic_ai import Agent
 from pydantic_ai.models.google import GoogleModel, GoogleModelSettings
 from pydantic_ai.providers.google import GoogleProvider
+
+from code_agent_models import CodeAgentRun
 
 # --- Configuration ---
 CONTEXT_SIZE_LIMIT = (
     500000  # The maximum size of context to be sent to the LLM in characters.
 )
+RUN_STATE_DIR = ".code_agent_runs"
 
 # A list of harm categories to be disabled in the safety settings for the Google AI model.
 # This allows the model to process and generate code that might otherwise be flagged.
@@ -410,3 +416,75 @@ def build_context_from_dict(
             context_parts.append(f"--- Content of {file_path} ---\n{content}\n")
 
     return "\n".join(context_parts)
+
+
+# --- Run State Management ---
+
+
+def save_run_state(directory: str, run_state: CodeAgentRun) -> bool:
+    """Saves the current state of a code agent run to a JSON file."""
+    save_dir = os.path.join(directory, RUN_STATE_DIR)
+    try:
+        os.makedirs(save_dir, exist_ok=True)
+        file_path = os.path.join(save_dir, f"{run_state.run_id}.json")
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(run_state.model_dump_json(indent=2))
+        logging.info(f"✅ Run state saved successfully to {file_path}")
+        return True
+    except Exception as e:
+        logging.error(f"❌ Failed to save run state for run_id {run_state.run_id}: {e}")
+        return False
+
+
+def load_run_state(directory: str, run_id: str) -> Optional[CodeAgentRun]:
+    """Loads a code agent run state from a JSON file."""
+    file_path = os.path.join(directory, RUN_STATE_DIR, f"{run_id}.json")
+    if not os.path.exists(file_path):
+        logging.warning(f"⚠️ No run state file found for run_id: {run_id}")
+        return None
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            data = f.read()
+            return CodeAgentRun.model_validate_json(data)
+    except (json.JSONDecodeError, ValidationError) as e:
+        logging.error(f"❌ Failed to parse run state file {file_path}: {e}")
+        return None
+    except Exception as e:
+        logging.error(f"❌ An unexpected error occurred while loading run state {file_path}: {e}")
+        return None
+
+
+def list_saved_runs(directory: str) -> List[CodeAgentRun]:
+    """Lists all saved (incomplete) code agent runs."""
+    save_dir = os.path.join(directory, RUN_STATE_DIR)
+    if not os.path.isdir(save_dir):
+        return []
+
+    saved_runs: List[CodeAgentRun] = []
+    run_files = glob.glob(os.path.join(save_dir, "*.json"))
+    for file_path in run_files:
+        run_id = os.path.splitext(os.path.basename(file_path))[0]
+        run_state = load_run_state(directory, run_id)
+        if run_state:
+            saved_runs.append(run_state)
+
+    # Sort by last update time, newest first
+    saved_runs.sort(key=lambda r: r.last_update_time, reverse=True)
+    logging.info(f"🔍 Found {len(saved_runs)} saved runs in {save_dir}")
+    return saved_runs
+
+
+def delete_run_state(directory: str, run_id: str) -> bool:
+    """Deletes the saved state file for a given run ID."""
+    file_path = os.path.join(directory, RUN_STATE_DIR, f"{run_id}.json")
+    try:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+            logging.info(f"✅ Deleted run state for run_id: {run_id}")
+            return True
+        else:
+            logging.warning(f"⚠️ Tried to delete non-existent run state for run_id: {run_id}")
+            return False
+    except Exception as e:
+        logging.error(f"❌ Failed to delete run state for run_id {run_id}: {e}")
+        return False

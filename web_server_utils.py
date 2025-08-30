@@ -83,7 +83,8 @@ class ApprovalHandler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         """Handles POST requests for user actions."""
-        if self.path in ["/approve", "/reject", "/feedback", "/user_input"]:
+        # Added /resume_run and /delete_run to handle saved run management from the GUI.
+        if self.path in ["/approve", "/reject", "/feedback", "/user_input", "/resume_run", "/delete_run"]:
             content_length = int(self.headers.get("Content-Length", 0))
             post_data = self.rfile.read(content_length)
 
